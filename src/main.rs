@@ -33,7 +33,15 @@ enum LauncherState {
 }
 
 fn main() {
-    dioxus::launch(App);
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(
+            dioxus::desktop::Config::new().with_window(
+                dioxus::desktop::tao::window::WindowBuilder::new()
+                    .with_title("World of Osso")
+                    .with_decorations(false),
+            ),
+        )
+        .launch(App);
 }
 
 #[component]
@@ -55,48 +63,82 @@ fn App() -> Element {
     rsx! {
         document::Stylesheet { href: asset!("/assets/style.css") }
         div { class: "launcher",
-            Header {}
-            Content { state, progress_pct }
+            TopBar {}
+            HeroSection {}
+            BottomBar { state, progress_pct }
         }
     }
 }
 
 #[component]
-fn Header() -> Element {
+fn TopBar() -> Element {
     rsx! {
-        div { class: "header",
-            h1 { "World of Osso" }
+        div { class: "top-bar",
+            span { class: "logo", "World of Osso" }
+            span { class: "separator" }
+            span { class: "game-tab", "Game" }
+            span { class: "version", "v0.1.0" }
         }
     }
 }
 
 #[component]
-fn Content(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element {
+fn HeroSection() -> Element {
+    rsx! {
+        div { class: "hero",
+            div { class: "hero-bg" }
+            div { class: "hero-content",
+                div { class: "game-title", "World of Osso" }
+                div { class: "game-subtitle", "A new adventure awaits" }
+            }
+            div { class: "news-area",
+                NewsCard { tag: "Update", title: "First playable build available", date: "Mar 7, 2026" }
+                NewsCard { tag: "Dev Log", title: "M2 models and terrain rendering", date: "Mar 5, 2026" }
+            }
+        }
+    }
+}
+
+#[component]
+fn NewsCard(tag: &'static str, title: &'static str, date: &'static str) -> Element {
+    rsx! {
+        div { class: "news-card",
+            div { class: "card-tag", "{tag}" }
+            div { class: "card-title", "{title}" }
+            div { class: "card-date", "{date}" }
+        }
+    }
+}
+
+#[component]
+fn BottomBar(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element {
     let current_state = state.read().clone();
     let pct = *progress_pct.read();
 
     rsx! {
-        div { class: "content",
+        div { class: "bottom-bar",
             match current_state {
                 LauncherState::Checking => rsx! {
-                    p { class: "status", "Checking for updates..." }
+                    span { class: "status-text checking", "Checking for updates" }
                 },
                 LauncherState::Downloading { ref current, done, total } => rsx! {
-                    DownloadProgress { current: current.clone(), done, total, pct }
+                    DownloadRow { current: current.clone(), done, total, pct }
                 },
                 LauncherState::Ready => rsx! {
                     PlayButton { state }
                 },
                 LauncherState::Error(ref msg) => rsx! {
-                    p { class: "error", "{msg}" }
-                    button {
-                        class: "retry-button",
-                        onclick: move |_| state.set(LauncherState::Checking),
-                        "Retry"
+                    div { class: "error-row",
+                        span { class: "error-text", "{msg}" }
+                        button {
+                            class: "retry-button",
+                            onclick: move |_| state.set(LauncherState::Checking),
+                            "Retry"
+                        }
                     }
                 },
                 LauncherState::Launching => rsx! {
-                    p { class: "status", "Launching..." }
+                    span { class: "launching-text", "Launching..." }
                 },
             }
         }
@@ -104,12 +146,18 @@ fn Content(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element {
 }
 
 #[component]
-fn DownloadProgress(current: String, done: usize, total: usize, pct: f64) -> Element {
+fn DownloadRow(current: String, done: usize, total: usize, pct: f64) -> Element {
     rsx! {
-        p { class: "status", "Downloading {done}/{total}: {current}" }
-        div { class: "progress-bar",
-            div { class: "progress-fill", style: "width: {pct:.1}%" }
+        div { class: "download-info",
+            span { class: "download-label",
+                strong { "Updating " }
+                "{done}/{total} — {current}"
+            }
+            div { class: "progress-bar",
+                div { class: "progress-fill", style: "width: {pct:.1}%" }
+            }
         }
+        span { class: "download-pct", "{pct:.0}%" }
     }
 }
 
@@ -122,7 +170,7 @@ fn PlayButton(state: Signal<LauncherState>) -> Element {
                 state.set(LauncherState::Launching);
                 launch_game(&game_directory());
             },
-            "PLAY"
+            "Play"
         }
     }
 }
