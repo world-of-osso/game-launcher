@@ -44,13 +44,21 @@ enum LauncherState {
 }
 
 fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("check-manifest") => return run_check_manifest(),
+        Some("self-update") => return run_self_update(),
+        Some("update") => return run_update(),
+        _ => {}
+    }
+
     cleanup_old_binary();
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             dioxus::desktop::Config::new().with_window(
                 dioxus::desktop::tao::window::WindowBuilder::new()
                     .with_title("World of Osso")
-                    .with_decorations(false),
+                    .with_decorations(false)
+                    .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(960, 640)),
             ),
         )
         .launch(App);
@@ -216,26 +224,80 @@ fn build_client() -> reqwest::Client {
         .unwrap()
 }
 
-async fn fetch_manifest(client: &reqwest::Client) -> Result<Manifest, String> {
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    cached: Option<&CachedManifest>,
+) -> Result<Option<Manifest>, String> {
     let path = "/api/manifest";
     let (ts, sig) = sign_request(path);
     let url = format!("{BASE_URL}{path}");
 
-    let resp = client
+    let mut req = client
         .get(&url)
         .header("x-launcher-ts", &ts)
-        .header("x-launcher-sig", &sig)
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {e}"))?;
+        .header("x-launcher-sig", &sig);
 
+    if let Some(c) = cached {
+        if let Some(ref etag) = c.etag {
+            req = req.header("If-None-Match", etag);
+        }
+        if let Some(ref lm) = c.last_modified {
+            req = req.header("If-Modified-Since", lm);
+        }
+    }
+
+    let resp = req.send().await.map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
     if !resp.status().is_success() {
         return Err(format!("Server error: {}", resp.status()));
     }
 
-    resp.json::<Manifest>()
-        .await
-        .map_err(|e| format!("Parse error: {e}"))
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let last_modified = resp
+        .headers()
+        .get("last-modified")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    let manifest: Manifest = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+
+    save_manifest_cache(&manifest, etag, last_modified);
+
+    Ok(Some(manifest))
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct CachedManifest {
+    manifest: Manifest,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+fn manifest_cache_path() -> PathBuf {
+    game_directory().join(".manifest_cache.json")
+}
+
+fn load_manifest_cache() -> Option<CachedManifest> {
+    let data = std::fs::read_to_string(manifest_cache_path()).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_manifest_cache(manifest: &Manifest, etag: Option<String>, last_modified: Option<String>) {
+    let cached = CachedManifest {
+        manifest: manifest.clone(),
+        etag,
+        last_modified,
+    };
+    if let Ok(json) = serde_json::to_string(&cached) {
+        let _ = std::fs::write(manifest_cache_path(), json);
+    }
 }
 
 async fn check_and_sync(
@@ -244,7 +306,11 @@ async fn check_and_sync(
     mut progress: Signal<f64>,
 ) -> Result<(), String> {
     let client = build_client();
-    let manifest = fetch_manifest(&client).await?;
+    let cached = load_manifest_cache();
+    let manifest = match fetch_manifest(&client, cached.as_ref()).await? {
+        Some(m) => m,
+        None => cached.expect("cache missing after 304").manifest,
+    };
 
     if let Some(ref launcher) = manifest.launcher {
         if launcher_needs_update(&launcher.version) {
@@ -353,6 +419,14 @@ fn version_cmp(v: &str) -> Vec<u32> {
 }
 
 async fn self_update(client: &reqwest::Client, update: &LauncherUpdate) -> Result<(), String> {
+    download_and_replace(client, update).await?;
+    restart_launcher()
+}
+
+async fn download_and_replace(
+    client: &reqwest::Client,
+    update: &LauncherUpdate,
+) -> Result<(), String> {
     let filename = update
         .platform
         .get(platform_key())
@@ -360,8 +434,7 @@ async fn self_update(client: &reqwest::Client, update: &LauncherUpdate) -> Resul
 
     let bytes = download_launcher_binary(client, filename).await?;
     verify_sha256(&bytes, &update.sha256)?;
-    replace_current_binary(&bytes)?;
-    restart_launcher()
+    replace_current_binary(&bytes)
 }
 
 async fn download_launcher_binary(
@@ -437,4 +510,114 @@ fn launch_game(game_dir: &Path) {
         .current_dir(game_dir)
         .spawn()
         .ok();
+}
+
+fn run_check_manifest() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = build_client();
+        let cached = load_manifest_cache();
+
+        if let Some(ref c) = cached {
+            eprintln!("Cache: etag={:?} last_modified={:?}", c.etag, c.last_modified);
+            eprintln!("Cached manifest version: {}", c.manifest.version);
+            eprintln!("Cached files: {}", c.manifest.files.len());
+        } else {
+            eprintln!("Cache: none");
+        }
+
+        match fetch_manifest(&client, cached.as_ref()).await {
+            Ok(Some(m)) => {
+                println!("DOWNLOADED — manifest version: {}, files: {}", m.version, m.files.len());
+            }
+            Ok(None) => {
+                println!("NOT MODIFIED — using cached manifest");
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+}
+
+fn run_self_update() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = build_client();
+        eprintln!("Current version: {LAUNCHER_VERSION}");
+
+        let manifest = match fetch_manifest(&client, None).await {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                eprintln!("No manifest returned");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("ERROR fetching manifest: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let Some(ref launcher) = manifest.launcher else {
+            println!("No launcher update in manifest");
+            return;
+        };
+
+        eprintln!("Remote version: {}", launcher.version);
+
+        if !launcher_needs_update(&launcher.version) {
+            println!("Already up to date (v{LAUNCHER_VERSION})");
+            return;
+        }
+
+        println!("Updating {LAUNCHER_VERSION} -> {}...", launcher.version);
+        match download_and_replace(&client, launcher).await {
+            Ok(()) => println!("Updated successfully — restart to use new version"),
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+}
+
+fn run_update() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = build_client();
+        let game_dir = game_directory();
+
+        let cached = load_manifest_cache();
+        let manifest = match fetch_manifest(&client, cached.as_ref()).await {
+            Ok(Some(m)) => {
+                eprintln!("Downloaded fresh manifest (version: {})", m.version);
+                m
+            }
+            Ok(None) => {
+                eprintln!("Manifest not modified, using cache");
+                cached.expect("cache missing after 304").manifest
+            }
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let needed = files_needing_update(&game_dir, &manifest.files).await;
+        if needed.is_empty() {
+            println!("All {} files up to date", manifest.files.len());
+            return;
+        }
+
+        println!("Downloading {}/{} files...", needed.len(), manifest.files.len());
+        for (i, entry) in needed.iter().enumerate() {
+            println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
+            if let Err(e) = download_file(&client, &game_dir, entry).await {
+                eprintln!("ERROR: {e}");
+                std::process::exit(1);
+            }
+        }
+        println!("Done");
+    });
 }
