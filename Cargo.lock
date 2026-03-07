@@ -651,6 +651,7 @@ name = "dioxus-debug"
 version = "0.1.0"
 source = "git+https://github.com/Osso/dioxus-debug.git#8dfdaf2b1292d7649a26572d158fda9497c719c0"
 dependencies = [
+ "base64",
  "dioxus",
  "glob",
  "libc",

@@ -48,6 +48,7 @@ fn main() {
         Some("check-manifest") => return run_check_manifest(),
         Some("self-update") => return run_self_update(),
         Some("update") => return run_update(),
+        Some("screenshot") => return run_screenshot(),
         _ => {}
     }
 
@@ -623,4 +624,28 @@ fn run_update() {
         }
         println!("Done");
     });
+}
+
+fn run_screenshot() {
+    let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.html".to_string());
+    let servers = dioxus_debug::client::find_servers();
+    let socket = match servers.len() {
+        0 => {
+            eprintln!("No running launcher found (no dioxus-debug socket)");
+            std::process::exit(1);
+        }
+        1 => &servers[0],
+        n => {
+            eprintln!("Found {n} sockets, using first: {}", servers[0].display());
+            &servers[0]
+        }
+    };
+
+    match dioxus_debug::client::screenshot_to_file(socket, &output) {
+        Ok(()) => println!("Saved to {output}"),
+        Err(e) => {
+            eprintln!("Screenshot failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
