@@ -66,6 +66,9 @@ fn main() {
 
 #[component]
 fn App() -> Element {
+    #[cfg(debug_assertions)]
+    dioxus_debug::use_debug_server();
+
     let mut state = use_signal(|| LauncherState::Checking);
     let progress_pct = use_signal(|| 0.0f64);
     let game_dir = game_directory();
