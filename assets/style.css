@@ -1,0 +1,96 @@
+body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0a0a1a;
+    color: #e0d8c8;
+}
+
+.launcher {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: linear-gradient(180deg, #0a0a1a 0%, #1a1a2e 50%, #16213e 100%);
+}
+
+.header {
+    text-align: center;
+    padding: 40px 0 20px;
+}
+
+.header h1 {
+    font-size: 36px;
+    color: #c9a55a;
+    text-shadow: 0 0 20px rgba(201, 165, 90, 0.3);
+    margin: 0;
+    letter-spacing: 2px;
+}
+
+.content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.status {
+    font-size: 16px;
+    color: #8a8a9a;
+    margin-bottom: 20px;
+}
+
+.progress-bar {
+    width: 400px;
+    height: 24px;
+    background: #1a1a2e;
+    border: 1px solid #333;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #c9a55a, #e0c882);
+    transition: width 0.3s ease;
+}
+
+.play-button {
+    font-size: 24px;
+    padding: 16px 80px;
+    background: linear-gradient(180deg, #c9a55a, #a07830);
+    color: #1a1a2e;
+    border: 2px solid #e0c882;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    letter-spacing: 4px;
+    transition: all 0.2s ease;
+}
+
+.play-button:hover {
+    background: linear-gradient(180deg, #e0c882, #c9a55a);
+    box-shadow: 0 0 20px rgba(201, 165, 90, 0.4);
+}
+
+.retry-button {
+    font-size: 16px;
+    padding: 10px 40px;
+    background: #333;
+    color: #e0d8c8;
+    border: 1px solid #555;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+.retry-button:hover {
+    background: #444;
+}
+
+.error {
+    color: #e05555;
+    font-size: 14px;
+    margin-bottom: 10px;
+}
