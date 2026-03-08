@@ -116,17 +116,17 @@ fn HeroSection() -> Element {
                 div { class: "game-subtitle", "A new adventure awaits" }
             }
             div { class: "news-area",
-                NewsCard { tag: "Update", title: "First playable build available", date: "Mar 7, 2026" }
-                NewsCard { tag: "Dev Log", title: "M2 models and terrain rendering", date: "Mar 5, 2026" }
+                NewsCard { tag: "Update", title: "First playable build available", date: "Mar 7, 2026", url: "https://worldofosso.com/news/first-playable-build.html" }
+                NewsCard { tag: "Dev Log", title: "M2 models and terrain rendering", date: "Mar 5, 2026", url: "https://worldofosso.com/news/m2-models-terrain-rendering.html" }
             }
         }
     }
 }
 
 #[component]
-fn NewsCard(tag: &'static str, title: &'static str, date: &'static str) -> Element {
+fn NewsCard(tag: &'static str, title: &'static str, date: &'static str, url: &'static str) -> Element {
     rsx! {
-        div { class: "news-card",
+        div { class: "news-card", onclick: move |_| { let _ = open::that(url); },
             div { class: "card-tag", "{tag}" }
             div { class: "card-title", "{title}" }
             div { class: "card-date", "{date}" }
@@ -627,7 +627,7 @@ fn run_update() {
 }
 
 fn run_screenshot() {
-    let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.html".to_string());
+    let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.webp".to_string());
     let servers = dioxus_debug::client::find_servers();
     let socket = match servers.len() {
         0 => {
