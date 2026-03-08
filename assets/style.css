@@ -88,22 +88,17 @@ body {
 .hero-bg {
     position: absolute;
     inset: 0;
-    /* Dark atmospheric gradient simulating game art */
-    background:
-        radial-gradient(ellipse 120% 80% at 50% 30%, rgba(26, 60, 100, 0.35) 0%, transparent 60%),
-        radial-gradient(ellipse 80% 60% at 70% 50%, rgba(180, 140, 60, 0.08) 0%, transparent 50%),
-        radial-gradient(ellipse 60% 80% at 20% 70%, rgba(20, 30, 60, 0.6) 0%, transparent 50%),
-        linear-gradient(175deg, #0c1020 0%, #0e1428 30%, #101830 50%, #0a0e1a 100%);
+    background: url('hero-bg.png') center/cover no-repeat;
     z-index: 0;
 }
 
-/* Atmospheric fog overlay */
+/* Bottom fade into chrome bar */
 .hero-bg::after {
     content: '';
     position: absolute;
     inset: 0;
     background:
-        radial-gradient(ellipse 100% 40% at 50% 100%, rgba(10, 14, 26, 0.95) 0%, transparent 70%);
+        linear-gradient(to bottom, transparent 50%, rgba(10, 14, 26, 0.8) 85%, var(--chrome) 100%);
 }
 
 /* Subtle vignette */
