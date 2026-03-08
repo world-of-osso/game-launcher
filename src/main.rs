@@ -8,7 +8,7 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const BASE_URL: &str = "https://worldofosso.com";
+const BASE_URL: &str = "https://files.worldofosso.com";
 const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HMAC_SECRET: &str = "8c526f3ec373cd70aeda607a6370a1548fe83184c2c93c16b9aa289927c07dda";
 
