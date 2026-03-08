@@ -30,7 +30,7 @@ body {
     display: grid;
     grid-template-rows: 40px 1fr 80px;
     height: 100vh;
-    min-width: 900px;
+    min-width: 0;
     min-height: 600px;
 }
 
@@ -123,19 +123,19 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px;
+    padding: 40px 0;
 }
 
 /* Game title in hero */
 .game-title {
     font-family: 'Cinzel', serif;
-    font-size: 52px;
+    font-size: clamp(24px, 5vw, 52px);
     font-weight: 900;
     color: var(--gold-light);
     text-shadow:
         0 0 40px rgba(180, 149, 74, 0.25),
         0 2px 4px rgba(0, 0, 0, 0.6);
-    letter-spacing: 4px;
+    letter-spacing: clamp(1px, 0.3vw, 4px);
     text-align: center;
     margin-bottom: 8px;
 }
@@ -164,8 +164,11 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.06);
     border-radius: 6px;
     padding: 14px 18px;
-    width: 260px;
+    flex: 1;
+    min-width: 0;
+    max-width: 260px;
     transition: border-color 0.2s, background 0.2s;
+    cursor: pointer;
 }
 
 .news-card:hover {

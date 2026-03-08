@@ -8,6 +8,8 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
+static SCREENSHOT_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 const BASE_URL: &str = "https://files.worldofosso.com";
 const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const HMAC_SECRET: &str = "8c526f3ec373cd70aeda607a6370a1548fe83184c2c93c16b9aa289927c07dda";
@@ -48,7 +50,10 @@ fn main() {
         Some("check-manifest") => return run_check_manifest(),
         Some("self-update") => return run_self_update(),
         Some("update") => return run_update(),
-        Some("screenshot") => return run_screenshot(),
+        Some("screenshot") => {
+            let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.webp".to_string());
+            SCREENSHOT_PATH.set(output).unwrap();
+        }
         _ => {}
     }
 
@@ -59,7 +64,7 @@ fn main() {
                 dioxus::desktop::tao::window::WindowBuilder::new()
                     .with_title("World of Osso")
                     .with_decorations(false)
-                    .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(960, 640)),
+                    .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(613, 732)),
             ),
         )
         .launch(App);
@@ -67,6 +72,10 @@ fn main() {
 
 #[component]
 fn App() -> Element {
+    if let Some(path) = SCREENSHOT_PATH.get() {
+        dioxus_debug::use_screenshot(path);
+    }
+
     #[cfg(debug_assertions)]
     dioxus_debug::use_debug_server();
 
@@ -626,26 +635,3 @@ fn run_update() {
     });
 }
 
-fn run_screenshot() {
-    let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.webp".to_string());
-    let servers = dioxus_debug::client::find_servers();
-    let socket = match servers.len() {
-        0 => {
-            eprintln!("No running launcher found (no dioxus-debug socket)");
-            std::process::exit(1);
-        }
-        1 => &servers[0],
-        n => {
-            eprintln!("Found {n} sockets, using first: {}", servers[0].display());
-            &servers[0]
-        }
-    };
-
-    match dioxus_debug::client::screenshot_to_file(socket, &output) {
-        Ok(()) => println!("Saved to {output}"),
-        Err(e) => {
-            eprintln!("Screenshot failed: {e}");
-            std::process::exit(1);
-        }
-    }
-}
