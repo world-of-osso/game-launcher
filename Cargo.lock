@@ -649,7 +649,7 @@ checksum = "bfc4b8cdc440a55c17355542fc2089d97949bba674255d84cac77805e1db8c9f"
 [[package]]
 name = "dioxus-debug"
 version = "0.1.0"
-source = "git+https://github.com/Osso/dioxus-debug.git#8dfdaf2b1292d7649a26572d158fda9497c719c0"
+source = "git+https://github.com/Osso/dioxus-debug.git#1512cfee8447953dbdcf3aed051c6a5b974b522f"
 dependencies = [
  "base64",
  "dioxus",
