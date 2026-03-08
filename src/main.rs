@@ -117,9 +117,10 @@ fn TopBar() -> Element {
 
 #[component]
 fn HeroSection() -> Element {
+    let hero_bg = asset!("/assets/hero-bg.png");
     rsx! {
         div { class: "hero",
-            div { class: "hero-bg" }
+            div { class: "hero-bg", style: "background-image: url('{hero_bg}')" }
             div { class: "hero-content",
                 div { class: "game-title", "World of Osso" }
                 div { class: "game-subtitle", "A new adventure awaits" }
