@@ -294,6 +294,18 @@ struct CachedManifest {
     last_modified: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct FileHashCache {
+    files: HashMap<String, CachedFileHash>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct CachedFileHash {
+    sha256: String,
+    size: u64,
+    mtime: u64,
+}
+
 fn manifest_cache_path() -> PathBuf {
     game_directory().join(".manifest_cache.json")
 }
@@ -301,6 +313,23 @@ fn manifest_cache_path() -> PathBuf {
 fn load_manifest_cache() -> Option<CachedManifest> {
     let data = std::fs::read_to_string(manifest_cache_path()).ok()?;
     serde_json::from_str(&data).ok()
+}
+
+fn hash_cache_path() -> PathBuf {
+    game_directory().join(".file_hashes.json")
+}
+
+fn load_hash_cache() -> FileHashCache {
+    std::fs::read_to_string(hash_cache_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_hash_cache(cache: &FileHashCache) {
+    if let Ok(json) = serde_json::to_string(cache) {
+        let _ = std::fs::write(hash_cache_path(), json);
+    }
 }
 
 fn save_manifest_cache(manifest: &Manifest, etag: Option<String>, last_modified: Option<String>) {
@@ -338,6 +367,7 @@ async fn check_and_sync(
         return Ok(());
     }
 
+    let mut hash_cache = load_hash_cache();
     let total = needed.len();
     for (i, entry) in needed.iter().enumerate() {
         state.set(LauncherState::Downloading {
@@ -347,30 +377,68 @@ async fn check_and_sync(
         });
         progress.set((i as f64 / total as f64) * 100.0);
         download_file(&client, game_dir, entry).await?;
+        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
     }
+    save_hash_cache(&hash_cache);
     progress.set(100.0);
     Ok(())
 }
 
 async fn files_needing_update(game_dir: &Path, files: &[FileEntry]) -> Vec<FileEntry> {
+    let mut hash_cache = load_hash_cache();
     let mut needed = Vec::new();
     for entry in files {
-        if file_needs_update(game_dir, entry).await {
+        if file_needs_update(game_dir, entry, &mut hash_cache).await {
             needed.push(entry.clone());
         }
     }
+    save_hash_cache(&hash_cache);
     needed
 }
 
-async fn file_needs_update(game_dir: &Path, entry: &FileEntry) -> bool {
+fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+async fn file_needs_update(
+    game_dir: &Path,
+    entry: &FileEntry,
+    hash_cache: &mut FileHashCache,
+) -> bool {
     let local_path = game_dir.join(&entry.path);
-    match tokio::fs::read(&local_path).await {
-        Ok(data) => {
-            use sha2::Digest;
-            hex::encode(Sha256::digest(&data)) != entry.sha256
+    let meta = match tokio::fs::metadata(&local_path).await {
+        Ok(m) => m,
+        Err(_) => return true,
+    };
+
+    let size = meta.len();
+    let mtime = mtime_secs(&meta);
+
+    if let Some(cached) = hash_cache.files.get(&entry.path) {
+        if cached.size == size && cached.mtime == mtime {
+            return cached.sha256 != entry.sha256;
         }
-        Err(_) => true,
     }
+
+    let data = match tokio::fs::read(&local_path).await {
+        Ok(d) => d,
+        Err(_) => return true,
+    };
+
+    use sha2::Digest;
+    let sha256 = hex::encode(Sha256::digest(&data));
+    let needs_update = sha256 != entry.sha256;
+
+    hash_cache.files.insert(
+        entry.path.clone(),
+        CachedFileHash { sha256, size, mtime },
+    );
+
+    needs_update
 }
 
 async fn download_file(
@@ -403,6 +471,24 @@ async fn download_file(
     tokio::fs::write(&local_path, &bytes)
         .await
         .map_err(|e| format!("Write error: {e}"))
+}
+
+async fn update_hash_cache_after_download(
+    game_dir: &Path,
+    entry: &FileEntry,
+    hash_cache: &mut FileHashCache,
+) {
+    let local_path = game_dir.join(&entry.path);
+    if let Ok(meta) = tokio::fs::metadata(&local_path).await {
+        hash_cache.files.insert(
+            entry.path.clone(),
+            CachedFileHash {
+                sha256: entry.sha256.clone(),
+                size: meta.len(),
+                mtime: mtime_secs(&meta),
+            },
+        );
+    }
 }
 
 fn cleanup_old_binary() {
