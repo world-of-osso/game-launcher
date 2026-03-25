@@ -72,12 +72,14 @@ fn main() {
 
 #[component]
 fn App() -> Element {
-    if let Some(path) = SCREENSHOT_PATH.get() {
-        dioxus_debug::use_screenshot(path);
+    #[cfg(feature = "debug")]
+    {
+        if let Some(path) = SCREENSHOT_PATH.get() {
+            dioxus_debug::use_screenshot(path);
+        }
+        #[cfg(debug_assertions)]
+        dioxus_debug::use_debug_server();
     }
-
-    #[cfg(debug_assertions)]
-    dioxus_debug::use_debug_server();
 
     let mut state = use_signal(|| LauncherState::Checking);
     let progress_pct = use_signal(|| 0.0f64);
