@@ -56,7 +56,6 @@ enum LauncherState {
 }
 
 fn main() {
-
     match std::env::args().nth(1).as_deref() {
         Some("check-manifest") => return run_check_manifest(),
         Some("self-update") => return run_self_update(),
@@ -83,6 +82,8 @@ fn main() {
         )
         .launch(App);
 }
+
+// --- UI Components ---
 
 #[component]
 fn App() -> Element {
@@ -233,10 +234,61 @@ fn PlayButton(state: Signal<LauncherState>) -> Element {
     }
 }
 
+// --- Platform ---
+
 fn game_directory() -> PathBuf {
     let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("WorldOfOsso")
 }
+
+fn platform_key() -> &'static str {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    { "linux-x86_64" }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    { "macos-x86_64" }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { "macos-aarch64" }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    { "windows-x86_64" }
+}
+
+fn game_engine_binary() -> String {
+    format!("game-engine-{}", platform_key())
+}
+
+/// Filter manifest to only include files for the current platform.
+/// Skips `game-engine-*` entries for other platforms.
+fn filter_platform_files(files: &[FileEntry]) -> Vec<FileEntry> {
+    let my_binary = game_engine_binary();
+    files
+        .iter()
+        .filter(|e| !e.path.starts_with("game-engine-") || e.path == my_binary)
+        .cloned()
+        .collect()
+}
+
+fn ensure_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            if meta.permissions().mode() & 0o111 == 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+}
+
+fn launch_game(game_dir: &Path) {
+    let bin = game_dir.join(game_engine_binary());
+    ensure_executable(&bin);
+    std::process::Command::new(&bin)
+        .current_dir(game_dir)
+        .spawn()
+        .ok();
+}
+
+// --- Auth ---
 
 fn sign_request(path: &str) -> (String, String) {
     let timestamp = std::time::SystemTime::now()
@@ -259,57 +311,7 @@ fn build_client() -> reqwest::Client {
         .unwrap()
 }
 
-async fn fetch_manifest(
-    client: &reqwest::Client,
-    cached: Option<&CachedManifest>,
-) -> Result<Option<Manifest>, String> {
-    let path = "/api/manifest";
-    let (ts, sig) = sign_request(path);
-    let url = format!("{BASE_URL}{path}");
-
-    let mut req = client
-        .get(&url)
-        .header("x-launcher-ts", &ts)
-        .header("x-launcher-sig", &sig);
-
-    if let Some(c) = cached {
-        if let Some(ref etag) = c.etag {
-            req = req.header("If-None-Match", etag);
-        }
-        if let Some(ref lm) = c.last_modified {
-            req = req.header("If-Modified-Since", lm);
-        }
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Network error: {e}"))?;
-
-    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-        return Ok(None);
-    }
-    if !resp.status().is_success() {
-        return Err(format!("Server error: {}", resp.status()));
-    }
-
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    let last_modified = resp
-        .headers()
-        .get("last-modified")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-
-    let manifest: Manifest = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
-
-    save_manifest_cache(&manifest, etag, last_modified);
-
-    Ok(Some(manifest))
-}
+// --- Manifest ---
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct CachedManifest {
@@ -339,6 +341,17 @@ fn load_manifest_cache() -> Option<CachedManifest> {
     serde_json::from_str(&data).ok()
 }
 
+fn save_manifest_cache(manifest: &Manifest, etag: Option<String>, last_modified: Option<String>) {
+    let cached = CachedManifest {
+        manifest: manifest.clone(),
+        etag,
+        last_modified,
+    };
+    if let Ok(json) = serde_json::to_string(&cached) {
+        let _ = std::fs::write(manifest_cache_path(), json);
+    }
+}
+
 fn hash_cache_path() -> PathBuf {
     game_directory().join(".file_hashes.json")
 }
@@ -356,56 +369,83 @@ fn save_hash_cache(cache: &FileHashCache) {
     }
 }
 
-fn save_manifest_cache(manifest: &Manifest, etag: Option<String>, last_modified: Option<String>) {
-    let cached = CachedManifest {
-        manifest: manifest.clone(),
-        etag,
-        last_modified,
-    };
-    if let Ok(json) = serde_json::to_string(&cached) {
-        let _ = std::fs::write(manifest_cache_path(), json);
+fn add_cache_headers(
+    req: reqwest::RequestBuilder,
+    cached: &CachedManifest,
+) -> reqwest::RequestBuilder {
+    let mut req = req;
+    if let Some(ref etag) = cached.etag {
+        req = req.header("If-None-Match", etag);
+    }
+    if let Some(ref lm) = cached.last_modified {
+        req = req.header("If-Modified-Since", lm);
+    }
+    req
+}
+
+async fn parse_manifest_response(resp: reqwest::Response) -> Result<Manifest, String> {
+    let etag = extract_response_header(&resp, "etag");
+    let last_modified = extract_response_header(&resp, "last-modified");
+    let manifest: Manifest = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+    save_manifest_cache(&manifest, etag, last_modified);
+    Ok(manifest)
+}
+
+fn extract_response_header(resp: &reqwest::Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
+
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    cached: Option<&CachedManifest>,
+) -> Result<Option<Manifest>, String> {
+    let path = "/api/manifest";
+    let (ts, sig) = sign_request(path);
+    let url = format!("{BASE_URL}{path}");
+
+    let mut req = client
+        .get(&url)
+        .header("x-launcher-ts", &ts)
+        .header("x-launcher-sig", &sig);
+
+    if let Some(c) = cached {
+        req = add_cache_headers(req, c);
+    }
+
+    let resp = req.send().await.map_err(|e| format!("Network error: {e}"))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Server error: {}", resp.status()));
+    }
+
+    parse_manifest_response(resp).await.map(Some)
+}
+
+/// Resolve manifest, using cache on 304.
+async fn resolve_manifest(client: &reqwest::Client) -> Result<Manifest, String> {
+    let cached = load_manifest_cache();
+    match fetch_manifest(client, cached.as_ref()).await? {
+        Some(m) => Ok(m),
+        None => cached
+            .map(|c| c.manifest)
+            .ok_or_else(|| "No manifest available".to_string()),
     }
 }
 
-async fn check_and_sync(
-    game_dir: &Path,
-    mut state: Signal<LauncherState>,
-    mut progress: Signal<f64>,
-) -> Result<(), String> {
-    let client = build_client();
-    let cached = load_manifest_cache();
-    let manifest = match fetch_manifest(&client, cached.as_ref()).await? {
-        Some(m) => m,
-        None => cached.expect("cache missing after 304").manifest,
-    };
+// --- File sync ---
 
-    if let Some(ref launcher) = manifest.launcher {
-        if launcher_needs_update(&launcher.version) {
-            state.set(LauncherState::UpdatingSelf);
-            self_update(&client, launcher).await?;
-        }
-    }
-
-    let needed = files_needing_update(game_dir, &filter_platform_files(&manifest.files)).await;
-    if needed.is_empty() {
-        return Ok(());
-    }
-
-    let mut hash_cache = load_hash_cache();
-    let total = needed.len();
-    for (i, entry) in needed.iter().enumerate() {
-        state.set(LauncherState::Downloading {
-            current: entry.path.clone(),
-            done: i,
-            total,
-        });
-        progress.set((i as f64 / total as f64) * 100.0);
-        download_file(&client, game_dir, entry).await?;
-        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
-    }
-    save_hash_cache(&hash_cache);
-    progress.set(100.0);
-    Ok(())
+fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn files_needing_update(game_dir: &Path, files: &[FileEntry]) -> Vec<FileEntry> {
@@ -418,14 +458,6 @@ async fn files_needing_update(game_dir: &Path, files: &[FileEntry]) -> Vec<FileE
     }
     save_hash_cache(&hash_cache);
     needed
-}
-
-fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 async fn file_needs_update(
@@ -448,7 +480,18 @@ async fn file_needs_update(
         }
     }
 
-    let data = match tokio::fs::read(&local_path).await {
+    hash_and_check(game_dir, entry, hash_cache, &local_path, size, mtime).await
+}
+
+async fn hash_and_check(
+    _game_dir: &Path,
+    entry: &FileEntry,
+    hash_cache: &mut FileHashCache,
+    local_path: &Path,
+    size: u64,
+    mtime: u64,
+) -> bool {
+    let data = match tokio::fs::read(local_path).await {
         Ok(d) => d,
         Err(_) => return true,
     };
@@ -459,11 +502,7 @@ async fn file_needs_update(
 
     hash_cache.files.insert(
         entry.path.clone(),
-        CachedFileHash {
-            sha256,
-            size,
-            mtime,
-        },
+        CachedFileHash { sha256, size, mtime },
     );
 
     needs_update
@@ -489,6 +528,14 @@ async fn download_file(
         .await
         .map_err(|e| format!("Read error: {e}"))?;
 
+    write_downloaded_file(game_dir, entry, &bytes).await
+}
+
+async fn write_downloaded_file(
+    game_dir: &Path,
+    entry: &FileEntry,
+    bytes: &[u8],
+) -> Result<(), String> {
     let local_path = game_dir.join(&entry.path);
     if let Some(parent) = local_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -496,15 +543,12 @@ async fn download_file(
             .map_err(|e| format!("mkdir error: {e}"))?;
     }
 
-    tokio::fs::write(&local_path, &bytes)
+    tokio::fs::write(&local_path, bytes)
         .await
         .map_err(|e| format!("Write error: {e}"))?;
 
-    #[cfg(unix)]
-    if entry.path == "game-engine" {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&local_path, perms).map_err(|e| format!("chmod error: {e}"))?;
+    if entry.path.starts_with("game-engine") {
+        ensure_executable(&local_path);
     }
 
     Ok(())
@@ -528,31 +572,57 @@ async fn update_hash_cache_after_download(
     }
 }
 
-fn cleanup_old_binary() {
-    if let Ok(exe) = std::env::current_exe() {
-        let old = exe.with_extension("old");
-        let _ = std::fs::remove_file(old);
+// --- Sync orchestration ---
+
+async fn check_and_sync(
+    game_dir: &Path,
+    mut state: Signal<LauncherState>,
+    progress: Signal<f64>,
+) -> Result<(), String> {
+    let client = build_client();
+    let manifest = resolve_manifest(&client).await?;
+
+    if let Some(ref launcher) = manifest.launcher {
+        if launcher_needs_update(&launcher.version) {
+            state.set(LauncherState::UpdatingSelf);
+            self_update(&client, launcher).await?;
+        }
     }
+
+    let files = filter_platform_files(&manifest.files);
+    let needed = files_needing_update(game_dir, &files).await;
+    if needed.is_empty() {
+        return Ok(());
+    }
+
+    sync_files(&client, game_dir, &needed, state, progress).await
 }
 
-fn platform_key() -> &'static str {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        "linux-x86_64"
+async fn sync_files(
+    client: &reqwest::Client,
+    game_dir: &Path,
+    needed: &[FileEntry],
+    mut state: Signal<LauncherState>,
+    mut progress: Signal<f64>,
+) -> Result<(), String> {
+    let mut hash_cache = load_hash_cache();
+    let total = needed.len();
+    for (i, entry) in needed.iter().enumerate() {
+        state.set(LauncherState::Downloading {
+            current: entry.path.clone(),
+            done: i,
+            total,
+        });
+        progress.set((i as f64 / total as f64) * 100.0);
+        download_file(client, game_dir, entry).await?;
+        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
     }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        "macos-x86_64"
-    }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "macos-aarch64"
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    {
-        "windows-x86_64"
-    }
+    save_hash_cache(&hash_cache);
+    progress.set(100.0);
+    Ok(())
 }
+
+// --- Self-update ---
 
 fn launcher_needs_update(remote_version: &str) -> bool {
     let current = env!("CARGO_PKG_VERSION");
@@ -607,9 +677,7 @@ fn verify_sha256(data: &[u8], expected: &str) -> Result<(), String> {
     use sha2::Digest;
     let actual = hex::encode(Sha256::digest(data));
     if actual != expected {
-        return Err(format!(
-            "SHA256 mismatch: expected {expected}, got {actual}"
-        ));
+        return Err(format!("SHA256 mismatch: expected {expected}, got {actual}"));
     }
     Ok(())
 }
@@ -621,17 +689,17 @@ fn replace_current_binary(new_bytes: &[u8]) -> Result<(), String> {
     let new_path = current_exe.with_extension("new");
 
     std::fs::write(&new_path, new_bytes).map_err(|e| format!("Write new binary: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&new_path, perms).map_err(|e| format!("Set permissions: {e}"))?;
-    }
-
+    ensure_executable(&new_path);
     std::fs::rename(&current_exe, &old_path).map_err(|e| format!("Rename current to .old: {e}"))?;
     std::fs::rename(&new_path, &current_exe).map_err(|e| format!("Rename .new into place: {e}"))?;
     Ok(())
+}
+
+fn cleanup_old_binary() {
+    if let Ok(exe) = std::env::current_exe() {
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 fn restart_launcher() -> Result<(), String> {
@@ -644,27 +712,7 @@ fn restart_launcher() -> Result<(), String> {
     std::process::exit(0);
 }
 
-fn launch_game(game_dir: &Path) {
-    #[cfg(target_os = "windows")]
-    let bin = game_dir.join("game-engine.exe");
-    #[cfg(not(target_os = "windows"))]
-    let bin = game_dir.join("game-engine");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&bin) {
-            if meta.permissions().mode() & 0o111 == 0 {
-                let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
-            }
-        }
-    }
-
-    std::process::Command::new(&bin)
-        .current_dir(game_dir)
-        .spawn()
-        .ok();
-}
+// --- CLI subcommands ---
 
 fn run_check_manifest() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -673,10 +721,7 @@ fn run_check_manifest() {
         let cached = load_manifest_cache();
 
         if let Some(ref c) = cached {
-            eprintln!(
-                "Cache: etag={:?} last_modified={:?}",
-                c.etag, c.last_modified
-            );
+            eprintln!("Cache: etag={:?} last_modified={:?}", c.etag, c.last_modified);
             eprintln!("Cached manifest version: {}", c.manifest.version);
             eprintln!("Cached files: {}", c.manifest.files.len());
         } else {
@@ -684,16 +729,8 @@ fn run_check_manifest() {
         }
 
         match fetch_manifest(&client, cached.as_ref()).await {
-            Ok(Some(m)) => {
-                println!(
-                    "DOWNLOADED — manifest version: {}, files: {}",
-                    m.version,
-                    m.files.len()
-                );
-            }
-            Ok(None) => {
-                println!("NOT MODIFIED — using cached manifest");
-            }
+            Ok(Some(m)) => println!("DOWNLOADED — version: {}, files: {}", m.version, m.files.len()),
+            Ok(None) => println!("NOT MODIFIED — using cached manifest"),
             Err(e) => {
                 eprintln!("ERROR: {e}");
                 std::process::exit(1);
@@ -708,14 +745,10 @@ fn run_self_update() {
         let client = build_client();
         eprintln!("Current version: {LAUNCHER_VERSION}");
 
-        let manifest = match fetch_manifest(&client, None).await {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                eprintln!("No manifest returned");
-                std::process::exit(1);
-            }
+        let manifest = match resolve_manifest(&client).await {
+            Ok(m) => m,
             Err(e) => {
-                eprintln!("ERROR fetching manifest: {e}");
+                eprintln!("ERROR: {e}");
                 std::process::exit(1);
             }
         };
@@ -748,41 +781,23 @@ fn run_update() {
     rt.block_on(async {
         let client = build_client();
         let game_dir = game_directory();
-
-        let cached = load_manifest_cache();
-        let manifest = match fetch_manifest(&client, cached.as_ref()).await {
-            Ok(Some(m)) => {
-                eprintln!("Downloaded fresh manifest (version: {})", m.version);
-                m
-            }
-            Ok(None) => {
-                eprintln!("Manifest not modified, using cache");
-                cached.expect("cache missing after 304").manifest
-            }
+        let manifest = match resolve_manifest(&client).await {
+            Ok(m) => m,
             Err(e) => {
                 eprintln!("ERROR: {e}");
                 std::process::exit(1);
             }
         };
 
-        let needed = files_needing_update(&game_dir, &filter_platform_files(&manifest.files)).await;
+        let files = filter_platform_files(&manifest.files);
+        let needed = files_needing_update(&game_dir, &files).await;
         if needed.is_empty() {
-            println!("All {} files up to date", manifest.files.len());
+            println!("All {} files up to date", files.len());
             return;
         }
 
-        println!(
-            "Downloading {}/{} files...",
-            needed.len(),
-            manifest.files.len()
-        );
-        for (i, entry) in needed.iter().enumerate() {
-            println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
-            if let Err(e) = download_file(&client, &game_dir, entry).await {
-                eprintln!("ERROR: {e}");
-                std::process::exit(1);
-            }
-        }
+        println!("Downloading {}/{} files...", needed.len(), files.len());
+        cli_download_files(&client, &game_dir, &needed).await;
         println!("Done");
     });
 }
@@ -792,35 +807,19 @@ fn run_play() {
     rt.block_on(async {
         let client = build_client();
         let game_dir = game_directory();
-
-        let cached = load_manifest_cache();
-        let manifest = match fetch_manifest(&client, cached.as_ref()).await {
-            Ok(Some(m)) => m,
-            Ok(None) => cached
-                .map(|c| c.manifest)
-                .unwrap_or_else(|| {
-                    eprintln!("ERROR: no manifest available");
-                    std::process::exit(1);
-                }),
+        let manifest = match resolve_manifest(&client).await {
+            Ok(m) => m,
             Err(e) => {
                 eprintln!("ERROR: {e}");
                 std::process::exit(1);
             }
         };
 
-        let needed = files_needing_update(&game_dir, &filter_platform_files(&manifest.files)).await;
+        let files = filter_platform_files(&manifest.files);
+        let needed = files_needing_update(&game_dir, &files).await;
         if !needed.is_empty() {
-            println!("Updating {}/{} files...", needed.len(), manifest.files.len());
-            let mut hash_cache = load_hash_cache();
-            for (i, entry) in needed.iter().enumerate() {
-                println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
-                if let Err(e) = download_file(&client, &game_dir, entry).await {
-                    eprintln!("ERROR: {e}");
-                    std::process::exit(1);
-                }
-                update_hash_cache_after_download(&game_dir, entry, &mut hash_cache).await;
-            }
-            save_hash_cache(&hash_cache);
+            println!("Updating {}/{} files...", needed.len(), files.len());
+            cli_download_files(&client, &game_dir, &needed).await;
         }
 
         println!("Launching...");
@@ -828,27 +827,15 @@ fn run_play() {
     });
 }
 
-/// Filter manifest files for the current platform.
-/// - `game-engine-<current-platform>` is remapped to `game-engine`
-/// - `game-engine-<other-platform>` entries are skipped
-/// - All other files pass through unchanged.
-fn filter_platform_files(files: &[FileEntry]) -> Vec<FileEntry> {
-    let my_platform = platform_key();
-    let my_binary = format!("game-engine-{my_platform}");
-    files
-        .iter()
-        .filter_map(|entry| {
-            if entry.path == my_binary {
-                Some(FileEntry {
-                    path: "game-engine".to_string(),
-                    sha256: entry.sha256.clone(),
-                    size: entry.size,
-                })
-            } else if entry.path.starts_with("game-engine-") {
-                None // other platform
-            } else {
-                Some(entry.clone())
-            }
-        })
-        .collect()
+async fn cli_download_files(client: &reqwest::Client, game_dir: &Path, needed: &[FileEntry]) {
+    let mut hash_cache = load_hash_cache();
+    for (i, entry) in needed.iter().enumerate() {
+        println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
+        if let Err(e) = download_file(client, game_dir, entry).await {
+            eprintln!("ERROR: {e}");
+            std::process::exit(1);
+        }
+        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
+    }
+    save_hash_cache(&hash_cache);
 }
