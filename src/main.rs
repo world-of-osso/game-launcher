@@ -40,18 +40,25 @@ enum LauncherState {
     Checking,
     UpdatingSelf,
     Ready,
-    Downloading { current: String, done: usize, total: usize },
+    Downloading {
+        current: String,
+        done: usize,
+        total: usize,
+    },
     Error(String),
     Launching,
 }
 
 fn main() {
+
     match std::env::args().nth(1).as_deref() {
         Some("check-manifest") => return run_check_manifest(),
         Some("self-update") => return run_self_update(),
         Some("update") => return run_update(),
         Some("screenshot") => {
-            let output = std::env::args().nth(2).unwrap_or_else(|| "screenshot.webp".to_string());
+            let output = std::env::args()
+                .nth(2)
+                .unwrap_or_else(|| "screenshot.webp".to_string());
             SCREENSHOT_PATH.set(output).unwrap();
         }
         _ => {}
@@ -136,7 +143,12 @@ fn HeroSection() -> Element {
 }
 
 #[component]
-fn NewsCard(tag: &'static str, title: &'static str, date: &'static str, url: &'static str) -> Element {
+fn NewsCard(
+    tag: &'static str,
+    title: &'static str,
+    date: &'static str,
+    url: &'static str,
+) -> Element {
     rsx! {
         div { class: "news-card", onclick: move |_| { let _ = open::that(url); },
             div { class: "card-tag", "{tag}" }
@@ -262,7 +274,10 @@ async fn fetch_manifest(
         }
     }
 
-    let resp = req.send().await.map_err(|e| format!("Network error: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
 
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
@@ -437,7 +452,11 @@ async fn file_needs_update(
 
     hash_cache.files.insert(
         entry.path.clone(),
-        CachedFileHash { sha256, size, mtime },
+        CachedFileHash {
+            sha256,
+            size,
+            mtime,
+        },
     );
 
     needs_update
@@ -478,8 +497,7 @@ async fn download_file(
     if entry.path == "game-engine" {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&local_path, perms)
-            .map_err(|e| format!("chmod error: {e}"))?;
+        std::fs::set_permissions(&local_path, perms).map_err(|e| format!("chmod error: {e}"))?;
     }
 
     Ok(())
@@ -512,13 +530,21 @@ fn cleanup_old_binary() {
 
 fn platform_key() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    { "linux-x86_64" }
+    {
+        "linux-x86_64"
+    }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    { "macos-x86_64" }
+    {
+        "macos-x86_64"
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    { "macos-aarch64" }
+    {
+        "macos-aarch64"
+    }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    { "windows-x86_64" }
+    {
+        "windows-x86_64"
+    }
 }
 
 fn launcher_needs_update(remote_version: &str) -> bool {
@@ -574,7 +600,9 @@ fn verify_sha256(data: &[u8], expected: &str) -> Result<(), String> {
     use sha2::Digest;
     let actual = hex::encode(Sha256::digest(data));
     if actual != expected {
-        return Err(format!("SHA256 mismatch: expected {expected}, got {actual}"));
+        return Err(format!(
+            "SHA256 mismatch: expected {expected}, got {actual}"
+        ));
     }
     Ok(())
 }
@@ -591,14 +619,11 @@ fn replace_current_binary(new_bytes: &[u8]) -> Result<(), String> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o755);
-        std::fs::set_permissions(&new_path, perms)
-            .map_err(|e| format!("Set permissions: {e}"))?;
+        std::fs::set_permissions(&new_path, perms).map_err(|e| format!("Set permissions: {e}"))?;
     }
 
-    std::fs::rename(&current_exe, &old_path)
-        .map_err(|e| format!("Rename current to .old: {e}"))?;
-    std::fs::rename(&new_path, &current_exe)
-        .map_err(|e| format!("Rename .new into place: {e}"))?;
+    std::fs::rename(&current_exe, &old_path).map_err(|e| format!("Rename current to .old: {e}"))?;
+    std::fs::rename(&new_path, &current_exe).map_err(|e| format!("Rename .new into place: {e}"))?;
     Ok(())
 }
 
@@ -631,7 +656,10 @@ fn run_check_manifest() {
         let cached = load_manifest_cache();
 
         if let Some(ref c) = cached {
-            eprintln!("Cache: etag={:?} last_modified={:?}", c.etag, c.last_modified);
+            eprintln!(
+                "Cache: etag={:?} last_modified={:?}",
+                c.etag, c.last_modified
+            );
             eprintln!("Cached manifest version: {}", c.manifest.version);
             eprintln!("Cached files: {}", c.manifest.files.len());
         } else {
@@ -640,7 +668,11 @@ fn run_check_manifest() {
 
         match fetch_manifest(&client, cached.as_ref()).await {
             Ok(Some(m)) => {
-                println!("DOWNLOADED — manifest version: {}, files: {}", m.version, m.files.len());
+                println!(
+                    "DOWNLOADED — manifest version: {}, files: {}",
+                    m.version,
+                    m.files.len()
+                );
             }
             Ok(None) => {
                 println!("NOT MODIFIED — using cached manifest");
@@ -722,7 +754,11 @@ fn run_update() {
             return;
         }
 
-        println!("Downloading {}/{} files...", needed.len(), manifest.files.len());
+        println!(
+            "Downloading {}/{} files...",
+            needed.len(),
+            manifest.files.len()
+        );
         for (i, entry) in needed.iter().enumerate() {
             println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
             if let Err(e) = download_file(&client, &game_dir, entry).await {
@@ -733,4 +769,3 @@ fn run_update() {
         println!("Done");
     });
 }
-
