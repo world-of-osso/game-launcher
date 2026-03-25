@@ -650,6 +650,16 @@ fn launch_game(game_dir: &Path) {
     #[cfg(not(target_os = "windows"))]
     let bin = game_dir.join("game-engine");
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&bin) {
+            if meta.permissions().mode() & 0o111 == 0 {
+                let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+
     std::process::Command::new(&bin)
         .current_dir(game_dir)
         .spawn()
