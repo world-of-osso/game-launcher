@@ -386,7 +386,7 @@ async fn check_and_sync(
         }
     }
 
-    let needed = files_needing_update(game_dir, &manifest.files).await;
+    let needed = files_needing_update(game_dir, &filter_platform_files(&manifest.files)).await;
     if needed.is_empty() {
         return Ok(());
     }
@@ -765,7 +765,7 @@ fn run_update() {
             }
         };
 
-        let needed = files_needing_update(&game_dir, &manifest.files).await;
+        let needed = files_needing_update(&game_dir, &filter_platform_files(&manifest.files)).await;
         if needed.is_empty() {
             println!("All {} files up to date", manifest.files.len());
             return;
@@ -808,7 +808,7 @@ fn run_play() {
             }
         };
 
-        let needed = files_needing_update(&game_dir, &manifest.files).await;
+        let needed = files_needing_update(&game_dir, &filter_platform_files(&manifest.files)).await;
         if !needed.is_empty() {
             println!("Updating {}/{} files...", needed.len(), manifest.files.len());
             let mut hash_cache = load_hash_cache();
@@ -826,4 +826,29 @@ fn run_play() {
         println!("Launching...");
         launch_game(&game_dir);
     });
+}
+
+/// Filter manifest files for the current platform.
+/// - `game-engine-<current-platform>` is remapped to `game-engine`
+/// - `game-engine-<other-platform>` entries are skipped
+/// - All other files pass through unchanged.
+fn filter_platform_files(files: &[FileEntry]) -> Vec<FileEntry> {
+    let my_platform = platform_key();
+    let my_binary = format!("game-engine-{my_platform}");
+    files
+        .iter()
+        .filter_map(|entry| {
+            if entry.path == my_binary {
+                Some(FileEntry {
+                    path: "game-engine".to_string(),
+                    sha256: entry.sha256.clone(),
+                    size: entry.size,
+                })
+            } else if entry.path.starts_with("game-engine-") {
+                None // other platform
+            } else {
+                Some(entry.clone())
+            }
+        })
+        .collect()
 }
