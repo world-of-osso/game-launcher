@@ -1334,6 +1334,7 @@ dependencies = [
 name = "game-launcher"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "dioxus",
  "dioxus-debug",
  "dirs-next",

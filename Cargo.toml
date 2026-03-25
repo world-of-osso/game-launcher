@@ -16,6 +16,7 @@ dirs-next = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "process"] }
 dioxus-debug = { git = "https://github.com/Osso/dioxus-debug.git", features = ["server"], optional = true }
 open = "5.3.3"
+base64 = "0.22.1"
 
 [features]
 default = ["desktop", "debug"]

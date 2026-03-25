@@ -9,6 +9,12 @@ use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
 
 static SCREENSHOT_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static HERO_BG_DATA_URI: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    use base64::Engine;
+    let bytes = include_bytes!("../assets/hero-bg.png");
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    format!("data:image/png;base64,{b64}")
+});
 
 const BASE_URL: &str = "https://files.worldofosso.com";
 const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -103,7 +109,7 @@ fn App() -> Element {
     });
 
     rsx! {
-        document::Stylesheet { href: asset!("/assets/style.css") }
+        style { dangerous_inner_html: include_str!("../assets/style.css") }
         div { class: "launcher",
             TopBar {}
             HeroSection {}
@@ -126,7 +132,7 @@ fn TopBar() -> Element {
 
 #[component]
 fn HeroSection() -> Element {
-    let hero_bg = asset!("/assets/hero-bg.png");
+    let hero_bg = &*HERO_BG_DATA_URI;
     rsx! {
         div { class: "hero",
             div { class: "hero-bg", style: "background-image: url('{hero_bg}')" }
