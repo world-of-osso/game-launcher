@@ -61,6 +61,7 @@ fn main() {
         Some("check-manifest") => return run_check_manifest(),
         Some("self-update") => return run_self_update(),
         Some("update") => return run_update(),
+        Some("play") => return run_play(),
         Some("screenshot") => {
             let output = std::env::args()
                 .nth(2)
@@ -773,5 +774,46 @@ fn run_update() {
             }
         }
         println!("Done");
+    });
+}
+
+fn run_play() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = build_client();
+        let game_dir = game_directory();
+
+        let cached = load_manifest_cache();
+        let manifest = match fetch_manifest(&client, cached.as_ref()).await {
+            Ok(Some(m)) => m,
+            Ok(None) => cached
+                .map(|c| c.manifest)
+                .unwrap_or_else(|| {
+                    eprintln!("ERROR: no manifest available");
+                    std::process::exit(1);
+                }),
+            Err(e) => {
+                eprintln!("ERROR: {e}");
+                std::process::exit(1);
+            }
+        };
+
+        let needed = files_needing_update(&game_dir, &manifest.files).await;
+        if !needed.is_empty() {
+            println!("Updating {}/{} files...", needed.len(), manifest.files.len());
+            let mut hash_cache = load_hash_cache();
+            for (i, entry) in needed.iter().enumerate() {
+                println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
+                if let Err(e) = download_file(&client, &game_dir, entry).await {
+                    eprintln!("ERROR: {e}");
+                    std::process::exit(1);
+                }
+                update_hash_cache_after_download(&game_dir, entry, &mut hash_cache).await;
+            }
+            save_hash_cache(&hash_cache);
+        }
+
+        println!("Launching...");
+        launch_game(&game_dir);
     });
 }
