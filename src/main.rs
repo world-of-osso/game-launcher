@@ -472,7 +472,17 @@ async fn download_file(
 
     tokio::fs::write(&local_path, &bytes)
         .await
-        .map_err(|e| format!("Write error: {e}"))
+        .map_err(|e| format!("Write error: {e}"))?;
+
+    #[cfg(unix)]
+    if entry.path == "game-engine" {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&local_path, perms)
+            .map_err(|e| format!("chmod error: {e}"))?;
+    }
+
+    Ok(())
 }
 
 async fn update_hash_cache_after_download(
