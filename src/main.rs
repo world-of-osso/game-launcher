@@ -243,13 +243,21 @@ fn game_directory() -> PathBuf {
 
 fn platform_key() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    { "linux-x86_64" }
+    {
+        "linux-x86_64"
+    }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    { "macos-x86_64" }
+    {
+        "macos-x86_64"
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    { "macos-aarch64" }
+    {
+        "macos-aarch64"
+    }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    { "windows-x86_64" }
+    {
+        "windows-x86_64"
+    }
 }
 
 fn game_engine_binary() -> String {
@@ -415,7 +423,10 @@ async fn fetch_manifest(
         req = add_cache_headers(req, c);
     }
 
-    let resp = req.send().await.map_err(|e| format!("Network error: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
 
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(None);
@@ -502,7 +513,11 @@ async fn hash_and_check(
 
     hash_cache.files.insert(
         entry.path.clone(),
-        CachedFileHash { sha256, size, mtime },
+        CachedFileHash {
+            sha256,
+            size,
+            mtime,
+        },
     );
 
     needs_update
@@ -677,7 +692,9 @@ fn verify_sha256(data: &[u8], expected: &str) -> Result<(), String> {
     use sha2::Digest;
     let actual = hex::encode(Sha256::digest(data));
     if actual != expected {
-        return Err(format!("SHA256 mismatch: expected {expected}, got {actual}"));
+        return Err(format!(
+            "SHA256 mismatch: expected {expected}, got {actual}"
+        ));
     }
     Ok(())
 }
@@ -721,7 +738,10 @@ fn run_check_manifest() {
         let cached = load_manifest_cache();
 
         if let Some(ref c) = cached {
-            eprintln!("Cache: etag={:?} last_modified={:?}", c.etag, c.last_modified);
+            eprintln!(
+                "Cache: etag={:?} last_modified={:?}",
+                c.etag, c.last_modified
+            );
             eprintln!("Cached manifest version: {}", c.manifest.version);
             eprintln!("Cached files: {}", c.manifest.files.len());
         } else {
@@ -729,7 +749,11 @@ fn run_check_manifest() {
         }
 
         match fetch_manifest(&client, cached.as_ref()).await {
-            Ok(Some(m)) => println!("DOWNLOADED — version: {}, files: {}", m.version, m.files.len()),
+            Ok(Some(m)) => println!(
+                "DOWNLOADED — version: {}, files: {}",
+                m.version,
+                m.files.len()
+            ),
             Ok(None) => println!("NOT MODIFIED — using cached manifest"),
             Err(e) => {
                 eprintln!("ERROR: {e}");
