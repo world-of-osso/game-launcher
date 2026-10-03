@@ -6,7 +6,6 @@ rust-version = "1.89"
 
 [dependencies]
 dioxus = "0.7"
-hmac = "0.12"
 hex = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

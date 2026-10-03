@@ -2,11 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-
-type HmacSha256 = Hmac<Sha256>;
 
 static SCREENSHOT_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static HERO_BG_DATA_URI: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -16,9 +13,10 @@ static HERO_BG_DATA_URI: std::sync::LazyLock<String> = std::sync::LazyLock::new(
     format!("data:image/png;base64,{b64}")
 });
 
+/// Public R2 bucket (worldofosso-client) behind its custom domain: the manifest at
+/// `/manifest.json`, every manifest path at `/<path>`.
 const BASE_URL: &str = "https://files.worldofosso.com";
 const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
-const HMAC_SECRET: &str = "8c526f3ec373cd70aeda607a6370a1548fe83184c2c93c16b9aa289927c07dda";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct Manifest {
@@ -296,20 +294,8 @@ fn launch_game(game_dir: &Path) {
         .ok();
 }
 
-// --- Auth ---
-
-fn sign_request(path: &str) -> (String, String) {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-
-    let message = format!("{timestamp}:{path}");
-    let mut mac = HmacSha256::new_from_slice(HMAC_SECRET.as_bytes()).unwrap();
-    mac.update(message.as_bytes());
-    let sig = hex::encode(mac.finalize().into_bytes());
-    (timestamp, sig)
+fn file_url(path: &str) -> String {
+    format!("{BASE_URL}/{path}")
 }
 
 fn build_client() -> reqwest::Client {
@@ -410,14 +396,7 @@ async fn fetch_manifest(
     client: &reqwest::Client,
     cached: Option<&CachedManifest>,
 ) -> Result<Option<Manifest>, String> {
-    let path = "/api/manifest";
-    let (ts, sig) = sign_request(path);
-    let url = format!("{BASE_URL}{path}");
-
-    let mut req = client
-        .get(&url)
-        .header("x-launcher-ts", &ts)
-        .header("x-launcher-sig", &sig);
+    let mut req = client.get(file_url("manifest.json"));
 
     if let Some(c) = cached {
         req = add_cache_headers(req, c);
@@ -528,16 +507,11 @@ async fn download_file(
     game_dir: &Path,
     entry: &FileEntry,
 ) -> Result<(), String> {
-    let path = format!("/files/{}", entry.path);
-    let (ts, sig) = sign_request(&path);
-    let url = format!("{BASE_URL}{path}");
-
     let bytes = client
-        .get(&url)
-        .header("x-launcher-ts", &ts)
-        .header("x-launcher-sig", &sig)
+        .get(file_url(&entry.path))
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("Download error for {}: {e}", entry.path))?
         .bytes()
         .await
@@ -671,16 +645,11 @@ async fn download_launcher_binary(
     client: &reqwest::Client,
     filename: &str,
 ) -> Result<Vec<u8>, String> {
-    let path = format!("/files/{filename}");
-    let (ts, sig) = sign_request(&path);
-    let url = format!("{BASE_URL}{path}");
-
     client
-        .get(&url)
-        .header("x-launcher-ts", &ts)
-        .header("x-launcher-sig", &sig)
+        .get(file_url(filename))
         .send()
         .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|e| format!("Download error: {e}"))?
         .bytes()
         .await
