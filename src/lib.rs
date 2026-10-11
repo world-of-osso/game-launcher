@@ -75,7 +75,11 @@ pub fn ensure_executable(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn spawn_player(game_dir: &Path, entry_name: &str) -> Result<std::process::Child, String> {
+pub fn spawn_player(
+    game_dir: &Path,
+    entry_name: &str,
+    arguments: &[std::ffi::OsString],
+) -> Result<std::process::Child, String> {
     let directory = std::fs::canonicalize(game_dir)
         .map_err(|error| format!("Resolve install directory {}: {error}", game_dir.display()))?;
     let binary = directory.join(entry_name);
@@ -90,6 +94,7 @@ pub fn spawn_player(game_dir: &Path, entry_name: &str) -> Result<std::process::C
     #[cfg(not(windows))]
     let working_dir = &directory;
     std::process::Command::new(&binary)
+        .args(arguments)
         .current_dir(working_dir)
         .spawn()
         .map_err(|error| format!("Start {}: {error}", binary.display()))

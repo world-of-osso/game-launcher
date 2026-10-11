@@ -207,7 +207,7 @@ fn PlayButton(state: Signal<LauncherState>) -> Element {
             class: "play-button",
             onclick: move |_| {
                 state.set(LauncherState::Launching);
-                if let Err(error) = launch_game(&game_directory()) {
+                if let Err(error) = launch_game(&game_directory(), &[]) {
                     state.set(LauncherState::Error(error));
                 }
             },
@@ -261,8 +261,8 @@ fn filter_platform_files(files: &[FileEntry]) -> Vec<FileEntry> {
         .collect()
 }
 
-fn launch_game(game_dir: &Path) -> Result<(), String> {
-    game_launcher::spawn_player(game_dir, &game_engine_binary()).map(|_| ())
+fn launch_game(game_dir: &Path, arguments: &[std::ffi::OsString]) -> Result<(), String> {
+    game_launcher::spawn_player(game_dir, &game_engine_binary(), arguments).map(|_| ())
 }
 
 fn base_url() -> String {
@@ -413,7 +413,7 @@ async fn sync_downloads(
 
 async fn check_and_sync(
     game_dir: &Path,
-    mut state: Signal<LauncherState>,
+    state: Signal<LauncherState>,
     progress: Signal<f64>,
 ) -> Result<(), String> {
     let client = build_client();
@@ -542,7 +542,8 @@ fn run_play() {
         }
 
         println!("Launching...");
-        if let Err(error) = launch_game(&game_dir) {
+        let arguments = std::env::args_os().skip(2).collect::<Vec<_>>();
+        if let Err(error) = launch_game(&game_dir, &arguments) {
             eprintln!("ERROR: {error}");
             std::process::exit(1);
         }

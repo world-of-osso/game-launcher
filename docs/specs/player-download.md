@@ -17,7 +17,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - [ ] Download concurrently with a fixed bound; retry transient GET failures with bounded backoff and jitter, respecting Retry-After.
 - [ ] UI and CLI use the same transfer/verification path, and expose errors rather than entering Ready/Launching on failure.
 - [ ] Windows supports its normal install directory and long nested asset paths without host registry/firewall changes. Godot launch from a project/install root exceeding its approximately 260-character CWD limit is not required; document that limitation.
-- [ ] Explicit LAN source/install-directory overrides permit isolated tests; normal launches use the production source and user data directory.
+- [ ] Explicit LAN source/install-directory overrides permit isolated tests; normal launches use the production source and user data directory. CLI `play` forwards following arguments unchanged to the player so private-server proof uses the normal downloaded entry; GUI Play supplies no arguments.
 - [ ] Connect deadline is 10 seconds; read inactivity deadline is 30 seconds and resets after successful reads. No whole-asset deadline.
 
 ## How it works

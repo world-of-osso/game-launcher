@@ -29,7 +29,7 @@ Transfers use four concurrent workers, 10-second connect and 30-second read-inac
 
 ## Isolated LAN proof
 
-Set `GAME_LAUNCHER_BASE_URL` to the owned manifest server and `GAME_LAUNCHER_GAME_DIR` to an isolated install directory; unset variables retain the production source and normal user-data location. Run `game-launcher update` to synchronize or `game-launcher play` to synchronize and start the real platform entry. Overrides do not alter host registry or firewall settings.
+Set `GAME_LAUNCHER_BASE_URL` to the owned manifest server and `GAME_LAUNCHER_GAME_DIR` to an isolated install directory; unset variables retain the production source and normal user-data location. Run `game-launcher update` to synchronize or `game-launcher play` to synchronize and start the real platform entry. CLI arguments after `play` are forwarded unchanged to the player, e.g. `game-launcher play --server 192.168.2.149:54392 --screen login`; GUI Play retains the normal no-argument launch. Overrides do not alter host registry or firewall settings.
 
 ## Release limitations
 

@@ -10,9 +10,25 @@ use std::{
 fn missing_player_spawn_returns_the_binary_path_and_error() {
     let dir = std::env::temp_dir().join(format!("launcher-spawn-error-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let error = spawn_player(&dir, "missing-player").unwrap_err();
+    let error = spawn_player(&dir, "missing-player", &[]).unwrap_err();
     assert!(error.contains("missing-player"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_player_spawn_forwards_client_arguments() {
+    let directory = std::env::temp_dir().join(format!("launcher-arguments-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    std::fs::copy(system.join("System32/cmd.exe"), directory.join("player")).unwrap();
+    let arguments = ["/c", "exit", "37"].map(std::ffi::OsString::from);
+    let status = spawn_player(&directory, "player", &arguments)
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(status.code(), Some(37));
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
@@ -90,7 +106,7 @@ fn windows_long_install_path_can_receive_hash_and_spawn_an_extensionless_pe() {
         )
         .unwrap();
         assert!(
-            spawn_player(&directory, "game-engine-windows-x86_64")
+            spawn_player(&directory, "game-engine-windows-x86_64", &[])
                 .unwrap()
                 .wait()
                 .unwrap()
