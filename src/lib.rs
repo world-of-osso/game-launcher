@@ -5,8 +5,86 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub mod cache;
+mod disk;
 mod retry;
+
+pub const MAX_PARALLEL_DOWNLOADS: usize = 4;
+
+pub async fn download_files(
+    client: &reqwest::Client,
+    base_url: &str,
+    game_dir: &Path,
+    entries: &[FileEntry],
+    mut completed: impl FnMut(&FileEntry, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    disk::prepare_download_space(game_dir, entries).await?;
+    let transfer = |entry: &FileEntry| {
+        let client = client.clone();
+        let url = format!("{base_url}/{}", entry.path);
+        let game_dir = game_dir.to_path_buf();
+        let entry = entry.clone();
+        async move {
+            download_file(&client, &url, &game_dir, &entry).await?;
+            Ok::<_, String>(entry)
+        }
+    };
+    let mut remaining = entries.iter();
+    let mut tasks = tokio::task::JoinSet::new();
+    for entry in remaining.by_ref().take(MAX_PARALLEL_DOWNLOADS) {
+        tasks.spawn(transfer(entry));
+    }
+    let mut count = 0;
+    while let Some(result) = tasks.join_next().await {
+        let entry = result.map_err(|error| format!("Download task failed: {error}"))??;
+        count += 1;
+        completed(&entry, count)?;
+        if let Some(entry) = remaining.next() {
+            tasks.spawn(transfer(entry));
+        }
+    }
+    Ok(())
+}
 use retry::{TransferFailure, retry_delay};
+
+pub fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .user_agent(concat!("WorldOfOsso-Launcher/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .build()
+}
+
+#[cfg(unix)]
+pub fn ensure_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta =
+        std::fs::metadata(path).map_err(|error| format!("Stat {}: {error}", path.display()))?;
+    if meta.permissions().mode() & 0o111 == 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("Make {} executable: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+pub fn spawn_player(game_dir: &Path, entry_name: &str) -> Result<std::process::Child, String> {
+    let directory = std::fs::canonicalize(game_dir)
+        .map_err(|error| format!("Resolve install directory {}: {error}", game_dir.display()))?;
+    let binary = directory.join(entry_name);
+    ensure_executable(&binary)?;
+    std::process::Command::new(&binary)
+        .current_dir(&directory)
+        .spawn()
+        .map_err(|error| format!("Start {}: {error}", binary.display()))
+}
 
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
@@ -63,9 +141,7 @@ async fn download_once(
         return Err(TransferFailure::status(&entry.path, &response));
     }
     let destination = game_dir.join(&entry.path);
-    let mut name = destination.as_os_str().to_os_string();
-    name.push(".part");
-    let partial = PathBuf::from(name);
+    let partial = partial_path(&destination);
     let result = write_verified_response(response, &partial, entry).await;
     if let Err(error) = result {
         if let Err(cleanup) = tokio::fs::remove_file(&partial).await
@@ -80,6 +156,12 @@ async fn download_once(
     tokio::fs::rename(&partial, &destination)
         .await
         .map_err(|error| format!("Install {}: {error}", destination.display()).into())
+}
+
+fn partial_path(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".part");
+    PathBuf::from(name)
 }
 
 async fn write_verified_response(
@@ -155,6 +237,13 @@ pub async fn hash_file(path: &Path) -> std::io::Result<String> {
 }
 
 #[cfg(test)]
+mod resume_tests;
+#[cfg(test)]
+mod runtime_tests;
+#[cfg(test)]
+mod scheduler_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
@@ -164,7 +253,7 @@ mod tests {
         thread,
     };
 
-    fn response_server(bytes: &'static [u8]) -> (String, thread::JoinHandle<()>) {
+    pub(super) fn response_server(bytes: &'static [u8]) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
@@ -180,6 +269,38 @@ mod tests {
             socket.write_all(bytes).unwrap();
         });
         (format!("http://{address}/texture.blp"), handle)
+    }
+
+    #[test]
+    fn disk_preflight_refuses_an_impossible_update_before_http() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while std::time::Instant::now() < deadline {
+                    if let Ok((mut socket, _)) = listener.accept() {
+                        socket.set_nonblocking(false).unwrap();
+                        socket.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                        let mut request = [0; 4096];
+                        socket.read(&mut request).unwrap();
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nexpected").unwrap();
+                        return true;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+                false
+            });
+            let directory = std::env::temp_dir().join(format!("launcher-disk-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let entry = FileEntry { path: "asset.blp".into(), sha256: hex::encode(Sha256::digest(b"expected")), size: 1 << 60 };
+            let result = download_files(&reqwest::Client::new(), &format!("http://{address}"), &directory, &[entry], |_, _| Ok(())).await;
+            let requested = server.join().unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+            assert!(result.unwrap_err().contains("disk space"));
+            assert!(!requested, "preflight must precede all GETs");
+        });
     }
 
     #[test]

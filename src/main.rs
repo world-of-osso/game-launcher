@@ -219,7 +219,9 @@ fn PlayButton(state: Signal<LauncherState>) -> Element {
             class: "play-button",
             onclick: move |_| {
                 state.set(LauncherState::Launching);
-                launch_game(&game_directory());
+                if let Err(error) = launch_game(&game_directory()) {
+                    state.set(LauncherState::Error(error));
+                }
             },
             "Play"
         }
@@ -229,8 +231,12 @@ fn PlayButton(state: Signal<LauncherState>) -> Element {
 // --- Platform ---
 
 fn game_directory() -> PathBuf {
-    let base = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("WorldOfOsso")
+    if let Some(directory) = std::env::var_os("GAME_LAUNCHER_GAME_DIR") {
+        return PathBuf::from(directory);
+    }
+    dirs_next::data_dir()
+        .expect("Find user data directory")
+        .join("WorldOfOsso")
 }
 
 fn platform_key() -> &'static str {
@@ -267,36 +273,20 @@ fn filter_platform_files(files: &[FileEntry]) -> Vec<FileEntry> {
         .collect()
 }
 
-fn ensure_executable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(path) {
-            if meta.permissions().mode() & 0o111 == 0 {
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
-            }
-        }
-    }
+fn launch_game(game_dir: &Path) -> Result<(), String> {
+    game_launcher::spawn_player(game_dir, &game_engine_binary()).map(|_| ())
 }
 
-fn launch_game(game_dir: &Path) {
-    let bin = game_dir.join(game_engine_binary());
-    ensure_executable(&bin);
-    std::process::Command::new(&bin)
-        .current_dir(game_dir)
-        .spawn()
-        .ok();
+fn base_url() -> String {
+    std::env::var("GAME_LAUNCHER_BASE_URL").unwrap_or_else(|_| BASE_URL.to_owned())
 }
 
 fn file_url(path: &str) -> String {
-    format!("{BASE_URL}/{path}")
+    format!("{}/{path}", base_url())
 }
 
 fn build_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent("WorldOfOsso-Launcher/0.1")
-        .build()
-        .unwrap()
+    game_launcher::http_client().expect("Create launcher HTTP client")
 }
 
 // --- Manifest ---
@@ -306,18 +296,6 @@ struct CachedManifest {
     manifest: Manifest,
     etag: Option<String>,
     last_modified: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-struct FileHashCache {
-    files: HashMap<String, CachedFileHash>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct CachedFileHash {
-    sha256: String,
-    size: u64,
-    mtime: u64,
 }
 
 fn manifest_cache_path() -> PathBuf {
@@ -337,23 +315,6 @@ fn save_manifest_cache(manifest: &Manifest, etag: Option<String>, last_modified:
     };
     if let Ok(json) = serde_json::to_string(&cached) {
         let _ = std::fs::write(manifest_cache_path(), json);
-    }
-}
-
-fn hash_cache_path() -> PathBuf {
-    game_directory().join(".file_hashes.json")
-}
-
-fn load_hash_cache() -> FileHashCache {
-    std::fs::read_to_string(hash_cache_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_hash_cache(cache: &FileHashCache) {
-    if let Ok(json) = serde_json::to_string(cache) {
-        let _ = std::fs::write(hash_cache_path(), json);
     }
 }
 
@@ -424,105 +385,39 @@ async fn resolve_manifest(client: &reqwest::Client) -> Result<Manifest, String> 
 
 // --- File sync ---
 
-fn mtime_secs(meta: &std::fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-async fn files_needing_update(game_dir: &Path, files: &[FileEntry]) -> Vec<FileEntry> {
-    let mut hash_cache = load_hash_cache();
+async fn files_needing_update(
+    game_dir: &Path,
+    files: &[FileEntry],
+) -> Result<Vec<FileEntry>, String> {
+    let mut cache = game_launcher::cache::FileHashCache::load(game_dir)?;
     let mut needed = Vec::new();
     for entry in files {
-        if file_needs_update(game_dir, entry, &mut hash_cache).await {
+        if cache.needs_update(game_dir, entry).await? {
             needed.push(entry.clone());
         }
     }
-    save_hash_cache(&hash_cache);
-    needed
+    cache.save(game_dir)?;
+    Ok(needed)
 }
 
-async fn file_needs_update(
-    game_dir: &Path,
-    entry: &FileEntry,
-    hash_cache: &mut FileHashCache,
-) -> bool {
-    let local_path = game_dir.join(&entry.path);
-    let meta = match tokio::fs::metadata(&local_path).await {
-        Ok(m) => m,
-        Err(_) => return true,
-    };
-
-    let size = meta.len();
-    let mtime = mtime_secs(&meta);
-
-    if let Some(cached) = hash_cache.files.get(&entry.path) {
-        if cached.size == size && cached.mtime == mtime {
-            return cached.sha256 != entry.sha256;
-        }
-    }
-
-    hash_and_check(game_dir, entry, hash_cache, &local_path, size, mtime).await
-}
-
-async fn hash_and_check(
-    _game_dir: &Path,
-    entry: &FileEntry,
-    hash_cache: &mut FileHashCache,
-    local_path: &Path,
-    size: u64,
-    mtime: u64,
-) -> bool {
-    let sha256 = match game_launcher::hash_file(local_path).await {
-        Ok(hash) => hash,
-        Err(error) => {
-            eprintln!("Hash {}: {error}", local_path.display());
-            return true;
-        }
-    };
-    let needs_update = sha256 != entry.sha256;
-
-    hash_cache.files.insert(
-        entry.path.clone(),
-        CachedFileHash {
-            sha256,
-            size,
-            mtime,
-        },
-    );
-
-    needs_update
-}
-
-async fn download_file(
+async fn sync_downloads(
     client: &reqwest::Client,
     game_dir: &Path,
-    entry: &FileEntry,
+    needed: &[FileEntry],
+    mut progress: impl FnMut(&FileEntry, usize),
 ) -> Result<(), String> {
-    game_launcher::download_file(client, &file_url(&entry.path), game_dir, entry).await?;
-    if entry.path.starts_with("game-engine") {
-        ensure_executable(&game_dir.join(&entry.path));
-    }
-    Ok(())
-}
-
-async fn update_hash_cache_after_download(
-    game_dir: &Path,
-    entry: &FileEntry,
-    hash_cache: &mut FileHashCache,
-) {
-    let local_path = game_dir.join(&entry.path);
-    if let Ok(meta) = tokio::fs::metadata(&local_path).await {
-        hash_cache.files.insert(
-            entry.path.clone(),
-            CachedFileHash {
-                sha256: entry.sha256.clone(),
-                size: meta.len(),
-                mtime: mtime_secs(&meta),
-            },
-        );
+    let mut cache = game_launcher::cache::FileHashCache::load(game_dir)?;
+    let result =
+        game_launcher::download_files(client, &base_url(), game_dir, needed, |entry, count| {
+            cache.record_verified(game_dir, entry)?;
+            progress(entry, count);
+            Ok(())
+        })
+        .await;
+    match (result, cache.save(game_dir)) {
+        (Err(transfer), Err(save)) => Err(format!("{transfer}; {save}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
 }
 
@@ -544,7 +439,7 @@ async fn check_and_sync(
     }
 
     let files = filter_platform_files(&manifest.files);
-    let needed = files_needing_update(game_dir, &files).await;
+    let needed = files_needing_update(game_dir, &files).await?;
     if needed.is_empty() {
         return Ok(());
     }
@@ -559,21 +454,20 @@ async fn sync_files(
     mut state: Signal<LauncherState>,
     mut progress: Signal<f64>,
 ) -> Result<(), String> {
-    let mut hash_cache = load_hash_cache();
-    let total = needed.len();
-    for (i, entry) in needed.iter().enumerate() {
+    state.set(LauncherState::Downloading {
+        current: needed[0].path.clone(),
+        done: 0,
+        total: needed.len(),
+    });
+    sync_downloads(client, game_dir, needed, |entry, done| {
         state.set(LauncherState::Downloading {
             current: entry.path.clone(),
-            done: i,
-            total,
+            done,
+            total: needed.len(),
         });
-        progress.set((i as f64 / total as f64) * 100.0);
-        download_file(client, game_dir, entry).await?;
-        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
-    }
-    save_hash_cache(&hash_cache);
-    progress.set(100.0);
-    Ok(())
+        progress.set(done as f64 / needed.len() as f64 * 100.0);
+    })
+    .await
 }
 
 // --- Self-update ---
@@ -640,7 +534,7 @@ fn replace_current_binary(new_bytes: &[u8]) -> Result<(), String> {
     let new_path = current_exe.with_extension("new");
 
     std::fs::write(&new_path, new_bytes).map_err(|e| format!("Write new binary: {e}"))?;
-    ensure_executable(&new_path);
+    game_launcher::ensure_executable(&new_path)?;
     std::fs::rename(&current_exe, &old_path).map_err(|e| format!("Rename current to .old: {e}"))?;
     std::fs::rename(&new_path, &current_exe).map_err(|e| format!("Rename .new into place: {e}"))?;
     Ok(())
@@ -748,7 +642,12 @@ fn run_update() {
         };
 
         let files = filter_platform_files(&manifest.files);
-        let needed = files_needing_update(&game_dir, &files).await;
+        let needed = files_needing_update(&game_dir, &files)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("ERROR: {error}");
+                std::process::exit(1);
+            });
         if needed.is_empty() {
             println!("All {} files up to date", files.len());
             return;
@@ -774,26 +673,32 @@ fn run_play() {
         };
 
         let files = filter_platform_files(&manifest.files);
-        let needed = files_needing_update(&game_dir, &files).await;
+        let needed = files_needing_update(&game_dir, &files)
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("ERROR: {error}");
+                std::process::exit(1);
+            });
         if !needed.is_empty() {
             println!("Updating {}/{} files...", needed.len(), files.len());
             cli_download_files(&client, &game_dir, &needed).await;
         }
 
         println!("Launching...");
-        launch_game(&game_dir);
+        if let Err(error) = launch_game(&game_dir) {
+            eprintln!("ERROR: {error}");
+            std::process::exit(1);
+        }
     });
 }
 
 async fn cli_download_files(client: &reqwest::Client, game_dir: &Path, needed: &[FileEntry]) {
-    let mut hash_cache = load_hash_cache();
-    for (i, entry) in needed.iter().enumerate() {
-        println!("  [{}/{}] {}", i + 1, needed.len(), entry.path);
-        if let Err(e) = download_file(client, game_dir, entry).await {
-            eprintln!("ERROR: {e}");
-            std::process::exit(1);
-        }
-        update_hash_cache_after_download(game_dir, entry, &mut hash_cache).await;
+    if let Err(error) = sync_downloads(client, game_dir, needed, |entry, done| {
+        println!("  [{}/{}] {}", done, needed.len(), entry.path);
+    })
+    .await
+    {
+        eprintln!("ERROR: {error}");
+        std::process::exit(1);
     }
-    save_hash_cache(&hash_cache);
 }

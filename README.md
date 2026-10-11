@@ -25,6 +25,12 @@ cargo build --release
 
 Game files are stored in `~/.local/share/WorldOfOsso/` (Linux) or the platform equivalent.
 
+Transfers use four concurrent workers, 10-second connect and 30-second read-inactivity deadlines, and allocation-aware disk-space preflight (`fs2`). Every file streams to a temporary path; size and SHA256 must match before replacement. Verified hashes are reused only when actual size and nanosecond modification time match. Completed files remain installed after a failed batch and are skipped on resume; incomplete files restart. UI and CLI share synchronization and report download/spawn errors.
+
+## Isolated LAN proof
+
+Set `GAME_LAUNCHER_BASE_URL` to the owned manifest server and `GAME_LAUNCHER_GAME_DIR` to an isolated install directory; unset variables retain the production source and normal user-data location. Run `game-launcher update` to synchronize or `game-launcher play` to synchronize and start the real platform entry. Overrides do not alter host registry or firewall settings.
+
 ## Related
 
 - [file-server](../file-server) — generates the manifest
