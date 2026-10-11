@@ -39,7 +39,7 @@ out-dir = "dist"
 binaries = [{ path = "game-launcher", main = true }]
 
 [package.metadata.packager.nsis]
-install-mode = "currentUser"
+installer-mode = "currentUser"
 installer-icon = "assets/world-of-osso.ico"
 
 [features]
