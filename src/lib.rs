@@ -196,6 +196,8 @@ mod tests {
                         thread::sleep(std::time::Duration::from_millis(5));
                         continue;
                     };
+                    socket.set_nonblocking(false).unwrap();
+                    socket.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
                     arrivals.push(start.elapsed());
                     let mut request = [0; 4096];
                     socket.read(&mut request).unwrap();
