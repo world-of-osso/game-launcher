@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
+use game_launcher::FileEntry;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -30,13 +31,6 @@ struct LauncherUpdate {
     version: String,
     sha256: String,
     platform: HashMap<String, String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct FileEntry {
-    path: String,
-    sha256: String,
-    size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -507,39 +501,10 @@ async fn download_file(
     game_dir: &Path,
     entry: &FileEntry,
 ) -> Result<(), String> {
-    let bytes = client
-        .get(file_url(&entry.path))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| format!("Download error for {}: {e}", entry.path))?
-        .bytes()
-        .await
-        .map_err(|e| format!("Read error: {e}"))?;
-
-    write_downloaded_file(game_dir, entry, &bytes).await
-}
-
-async fn write_downloaded_file(
-    game_dir: &Path,
-    entry: &FileEntry,
-    bytes: &[u8],
-) -> Result<(), String> {
-    let local_path = game_dir.join(&entry.path);
-    if let Some(parent) = local_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("mkdir error: {e}"))?;
-    }
-
-    tokio::fs::write(&local_path, bytes)
-        .await
-        .map_err(|e| format!("Write error: {e}"))?;
-
+    game_launcher::download_file(client, &file_url(&entry.path), game_dir, entry).await?;
     if entry.path.starts_with("game-engine") {
-        ensure_executable(&local_path);
+        ensure_executable(&game_dir.join(&entry.path));
     }
-
     Ok(())
 }
 
