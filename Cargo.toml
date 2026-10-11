@@ -41,6 +41,14 @@ binaries = [{ path = "game-launcher", main = true }]
 [package.metadata.packager.nsis]
 installer-mode = "currentUser"
 installer-icon = "assets/world-of-osso.ico"
+# WebView2 writes its owned browser profile beside the executable. NSIS's default
+# uninstaller removes packaged files only; remove this runtime profile as well.
+preinstall-section = '''
+Function un.onUninstSuccess
+  RMDir /r "$INSTDIR\${MAINBINARYNAME}.exe.WebView2"
+  RMDir "$INSTDIR"
+FunctionEnd
+'''
 
 [features]
 default = ["desktop", "debug"]
