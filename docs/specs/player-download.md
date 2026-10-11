@@ -41,7 +41,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 ## Known gaps (current cycle)
 
 - [x] Native Windows transfer tests10/10 at cbdb680: bounded scheduler, retry, nanos metadata/completed resume, disk-space refusal, body read timeout, spawn error and long install path PE spawn. Evidence: engine data/diagnostics/windows-release-2026-10-11/launcher-runtime-green-2.log.
-- [x] Native Windows normal-root LAN subset: actual launcher verification/download and entry reach Login→roster→authoritative InWorld; 9/9 terrain tiles loaded, no pending/failed tiles. Engine `7af3f6ca0` / protocol `252f409`, private UDP54392; evidence in engine `data/diagnostics/windows-release-2026-10-11/release4-live-assets-2.log` and `lan-release4-proof/`.
+- [x] Native Windows normal-root LAN subset: actual launcher verification/download and entry reach Login→roster→authoritative InWorld; 9/9 terrain tiles loaded, no pending/failed tiles. DLL `99256a4f9` / frozen protocol `58e8ac9`, matching historical server master `0fd9d401`, private UDP54392; evidence in engine `data/diagnostics/windows-release-2026-10-11/final-frozen58-lan-proof.log` and `lan-release4-proof/`. Published player builds must use current master rather than the frozen proof artifacts.
 - [ ] Full published download/start and all-map/offline asset certification. LAN subset acceptance does not prove these.
 
 ## Out of scope
