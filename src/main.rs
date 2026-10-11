@@ -475,13 +475,13 @@ async fn hash_and_check(
     size: u64,
     mtime: u64,
 ) -> bool {
-    let data = match tokio::fs::read(local_path).await {
-        Ok(d) => d,
-        Err(_) => return true,
+    let sha256 = match game_launcher::hash_file(local_path).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("Hash {}: {error}", local_path.display());
+            return true;
+        }
     };
-
-    use sha2::Digest;
-    let sha256 = hex::encode(Sha256::digest(&data));
     let needs_update = sha256 != entry.sha256;
 
     hash_cache.files.insert(
