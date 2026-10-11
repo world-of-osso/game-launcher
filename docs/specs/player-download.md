@@ -40,7 +40,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 ## Known gaps (current cycle)
 
-- [ ] Bounded scheduler, retry, metadata/resume and disk-space tests.
+- [x] Native Windows transfer tests10/10 at cbdb680: bounded scheduler, retry, nanos metadata/completed resume, disk-space refusal, body read timeout, spawn error and long install path PE spawn. Evidence: engine data/diagnostics/windows-release-2026-10-11/launcher-runtime-green-2.log.
 - [ ] Native Windows subset-manifest LAN fixture and full published download/start.
 
 ## Out of scope

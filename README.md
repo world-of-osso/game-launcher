@@ -31,6 +31,10 @@ Transfers use four concurrent workers, 10-second connect and 30-second read-inac
 
 Set `GAME_LAUNCHER_BASE_URL` to the owned manifest server and `GAME_LAUNCHER_GAME_DIR` to an isolated install directory; unset variables retain the production source and normal user-data location. Run `game-launcher update` to synchronize or `game-launcher play` to synchronize and start the real platform entry. Overrides do not alter host registry or firewall settings.
 
+## Known self-update issue
+
+The optional launcher-update schema currently has one SHA256 for every platform binary. Different platform executables need separate digests. Current file-server manifests omit launcher metadata, so this path is inactive in the present release flow; schema migration is deferred, not fixed by player-transfer verification.
+
 ## Related
 
 - [file-server](../file-server) — generates the manifest
