@@ -7,6 +7,8 @@ rust-version = "1.89"
 [dependencies]
 dioxus = "0.7"
 hex = "0.4"
+# Retry-After accepts HTTP dates as well as delay seconds.
+httpdate = "1"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

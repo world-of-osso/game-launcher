@@ -5,7 +5,11 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+mod retry;
+use retry::{TransferFailure, retry_delay};
+
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_DOWNLOAD_ATTEMPTS: u32 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileEntry {
@@ -20,12 +24,44 @@ pub async fn download_file(
     game_dir: &Path,
     entry: &FileEntry,
 ) -> Result<(), String> {
+    for attempt in 0..MAX_DOWNLOAD_ATTEMPTS {
+        match download_once(client, url, game_dir, entry).await {
+            Ok(()) => return Ok(()),
+            Err(failure) => {
+                let Some(server_delay) = failure.retry_after else {
+                    return Err(failure.message);
+                };
+                if attempt + 1 == MAX_DOWNLOAD_ATTEMPTS {
+                    return Err(failure.message);
+                }
+                let delay = retry_delay(attempt, server_delay)?;
+                eprintln!(
+                    "{}; retry {} in {:.2}s",
+                    failure.message,
+                    attempt + 1,
+                    delay.as_secs_f64()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+    unreachable!("download attempt limit must be positive")
+}
+
+async fn download_once(
+    client: &reqwest::Client,
+    url: &str,
+    game_dir: &Path,
+    entry: &FileEntry,
+) -> Result<(), TransferFailure> {
     let response = client
         .get(url)
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| format!("Download {}: {error}", entry.path))?;
+        .map_err(|error| TransferFailure::network(&entry.path, error))?;
+    if !response.status().is_success() {
+        return Err(TransferFailure::status(&entry.path, &response));
+    }
     let destination = game_dir.join(&entry.path);
     let mut name = destination.as_os_str().to_os_string();
     name.push(".part");
@@ -35,34 +71,37 @@ pub async fn download_file(
         if let Err(cleanup) = tokio::fs::remove_file(&partial).await
             && cleanup.kind() != std::io::ErrorKind::NotFound
         {
-            return Err(format!("{error}; remove {}: {cleanup}", partial.display()));
+            return Err(
+                format!("{}; remove {}: {cleanup}", error.message, partial.display()).into(),
+            );
         }
         return Err(error);
     }
     tokio::fs::rename(&partial, &destination)
         .await
-        .map_err(|error| format!("Install {}: {error}", destination.display()))
+        .map_err(|error| format!("Install {}: {error}", destination.display()).into())
 }
 
 async fn write_verified_response(
     mut response: reqwest::Response,
     partial: &Path,
     entry: &FileEntry,
-) -> Result<(), String> {
+) -> Result<(), TransferFailure> {
     let mut file = create_partial_file(partial).await?;
     let mut hasher = Sha256::new();
     let mut size = 0u64;
     while let Some(bytes) = response
         .chunk()
         .await
-        .map_err(|error| format!("Read {}: {error}", entry.path))?
+        .map_err(|error| TransferFailure::network(&entry.path, error))?
     {
         size += bytes.len() as u64;
         if size > entry.size {
             return Err(format!(
                 "Size mismatch for {}: exceeds {} bytes",
                 entry.path, entry.size
-            ));
+            )
+            .into());
         }
         hasher.update(&bytes);
         file.write_all(&bytes)
@@ -72,7 +111,7 @@ async fn write_verified_response(
     file.flush()
         .await
         .map_err(|error| format!("Flush {}: {error}", partial.display()))?;
-    verify_file_receipt(entry, size, &hex::encode(hasher.finalize()))
+    verify_file_receipt(entry, size, &hex::encode(hasher.finalize())).map_err(TransferFailure::from)
 }
 
 async fn create_partial_file(path: &Path) -> Result<tokio::fs::File, String> {
@@ -141,6 +180,44 @@ mod tests {
             socket.write_all(bytes).unwrap();
         });
         (format!("http://{address}/texture.blp"), handle)
+    }
+
+    #[test]
+    fn retry_after_is_respected_before_a_transient_get_is_retried() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let mut arrivals = Vec::new();
+                while start.elapsed() < std::time::Duration::from_secs(3) && arrivals.len() < 2 {
+                    let Ok((mut socket, _)) = listener.accept() else {
+                        thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    };
+                    arrivals.push(start.elapsed());
+                    let mut request = [0; 4096];
+                    socket.read(&mut request).unwrap();
+                    let response = if arrivals.len() == 1 {
+                        b"HTTP/1.1 503 Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nexpected".as_slice()
+                    };
+                    socket.write_all(response).unwrap();
+                }
+                arrivals
+            });
+            let directory = std::env::temp_dir().join(format!("launcher-retry-{}", std::process::id()));
+            let entry = FileEntry { path: "texture.blp".into(), sha256: hex::encode(Sha256::digest(b"expected")), size: 8 };
+            let result = download_file(&reqwest::Client::new(), &format!("http://{address}/texture.blp"), &directory, &entry).await;
+            let arrivals = server.join().unwrap();
+            assert!(result.is_ok(), "transient GET not retried: {result:?}");
+            assert_eq!(arrivals.len(), 2);
+            assert!(arrivals[1] - arrivals[0] >= std::time::Duration::from_secs(1));
+            assert_eq!(std::fs::read(directory.join("texture.blp")).unwrap(), b"expected");
+            std::fs::remove_dir_all(directory).unwrap();
+        });
     }
 
     #[test]
