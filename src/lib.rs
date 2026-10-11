@@ -80,8 +80,17 @@ pub fn spawn_player(game_dir: &Path, entry_name: &str) -> Result<std::process::C
         .map_err(|error| format!("Resolve install directory {}: {error}", game_dir.display()))?;
     let binary = directory.join(entry_name);
     ensure_executable(&binary)?;
+    // CreateProcessW rejects a CWD beyond MAX_PATH. Windows player entries resolve
+    // their installation from their executable, not from the process CWD.
+    #[cfg(windows)]
+    let working_dir = directory
+        .ancestors()
+        .last()
+        .expect("canonical path is rooted");
+    #[cfg(not(windows))]
+    let working_dir = &directory;
     std::process::Command::new(&binary)
-        .current_dir(&directory)
+        .current_dir(working_dir)
         .spawn()
         .map_err(|error| format!("Start {}: {error}", binary.display()))
 }
