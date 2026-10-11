@@ -16,7 +16,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 - [ ] Download concurrently with a fixed bound; retry transient GET failures with bounded backoff and jitter, respecting Retry-After.
 - [ ] UI and CLI use the same transfer/verification path, and expose errors rather than entering Ready/Launching on failure.
-- [ ] Windows supports its normal install directory and long paths without host registry/firewall changes.
+- [ ] Windows supports its normal install directory and long nested asset paths without host registry/firewall changes. Godot launch from a project/install root exceeding its approximately 260-character CWD limit is not required; document that limitation.
 - [ ] Explicit LAN source/install-directory overrides permit isolated tests; normal launches use the production source and user data directory.
 - [ ] Connect deadline is 10 seconds; read inactivity deadline is 30 seconds and resets after successful reads. No whole-asset deadline.
 
@@ -46,4 +46,5 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 ## Out of scope
 
 - Launcher release/publishing: lead-owned.
+- Launcher self-update: disabled for this release, including manifests containing launcher metadata; per-platform digest schema and updater are deferred.
 - Byte-range partial-file resume: completed files must resume; incomplete files may restart.
