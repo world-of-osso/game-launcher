@@ -1,10 +1,14 @@
 //! Per-user Start Menu integration for the portable Windows executable.
 
-use std::os::windows::process::CommandExt;
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::process::Command;
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize, IPersistFile,
+};
+use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows::core::{Interface, PCWSTR, w};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ICON: &[u8] = include_bytes!("../assets/world-of-osso.ico");
 
 pub fn install_portable_start_menu_entry() -> Result<(), String> {
@@ -48,44 +52,49 @@ pub fn create_start_menu_shortcut(
 }
 
 fn save_shell_link(shortcut: &Path, executable: &Path, icon: &Path) -> Result<(), String> {
-    let script = r#"
-$ErrorActionPreference='Stop'
-if (Test-Path -LiteralPath $env:WOO_SHORTCUT) { exit 0 }
-$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:WOO_SHORTCUT)
-$link.TargetPath=$env:WOO_EXECUTABLE
-$link.WorkingDirectory=[System.IO.Path]::GetDirectoryName($env:WOO_EXECUTABLE)
-$link.Description='World of Osso'
-$link.IconLocation=$env:WOO_ICON_PATH+',0'
-$link.Save()
-"#;
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .env("WOO_SHORTCUT", shortcut)
-        .env("WOO_EXECUTABLE", executable)
-        .env("WOO_ICON_PATH", icon)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|error| {
-            format!(
-                "Create Start Menu shell link {}: {error}",
-                shortcut.display()
-            )
-        })?;
-    if output.status.success() {
-        return Ok(());
+    // Shell interfaces live only inside this paired COM initialization.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+        .ok()
+        .map_err(|error| format!("Initialize Start Menu COM: {error}"))?;
+    let result = save_com_shell_link(shortcut, executable, icon);
+    unsafe { CoUninitialize() };
+    result.map_err(|error| format!("Save Start Menu shell link {}: {error}", shortcut.display()))
+}
+
+fn save_com_shell_link(
+    shortcut: &Path,
+    executable: &Path,
+    icon: &Path,
+) -> windows::core::Result<()> {
+    let target = encode_wide_path(executable);
+    let icon = encode_wide_path(icon);
+    let shortcut = encode_wide_path(shortcut);
+    let directory = encode_wide_path(
+        executable
+            .parent()
+            .expect("launcher executable has a parent"),
+    );
+    // NUL-terminated UTF-16 buffers remain alive throughout these Shell calls.
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(PCWSTR(target.as_ptr()))?;
+        link.SetWorkingDirectory(PCWSTR(directory.as_ptr()))?;
+        link.SetDescription(w!("World of Osso"))?;
+        link.SetIconLocation(PCWSTR(icon.as_ptr()), 0)?;
+        let file: IPersistFile = link.cast()?;
+        file.Save(PCWSTR(shortcut.as_ptr()), true)
     }
-    Err(format!(
-        "Create Start Menu shell link {}: {}",
-        shortcut.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+}
+
+fn encode_wide_path(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
-    use std::process::Command;
+    use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::UI::Shell::SLGP_RAWPATH;
 
     #[test]
     fn creates_real_shell_link_and_keeps_existing_target() {
@@ -106,15 +115,10 @@ mod tests {
             shortcut.is_file(),
             "First run must create a real Start Menu link"
         );
-        let link = read_link(&shortcut);
-        assert_eq!(
-            link["target"].as_str().unwrap(),
-            executable.to_str().unwrap()
-        );
-        assert_eq!(
-            link["icon"].as_str().unwrap(),
-            format!("{},0", icons.join("world-of-osso.ico").display())
-        );
+        let (target, icon, index) = read_link(&shortcut);
+        assert_eq!(target, executable.to_str().unwrap());
+        assert_eq!(icon, icons.join("world-of-osso.ico").to_str().unwrap());
+        assert_eq!(index, 0);
         assert!(icons.join("world-of-osso.ico").is_file());
         let original = std::fs::read(&shortcut).unwrap();
         create_start_menu_shortcut(&programs, &root.join("different.exe"), &icons).unwrap();
@@ -135,21 +139,34 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn read_link(path: &Path) -> Value {
-        let output = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$link=(New-Object -ComObject WScript.Shell).CreateShortcut($env:WOO_SHORTCUT); @{target=$link.TargetPath;icon=$link.IconLocation}|ConvertTo-Json -Compress",
-            ])
-            .env("WOO_SHORTCUT", path)
-            .output()
+    fn read_link(path: &Path) -> (String, String, i32) {
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice(&output.stdout).unwrap()
+        let result = unsafe {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            let file: IPersistFile = link.cast().unwrap();
+            let path = encode_wide_path(path);
+            file.Load(PCWSTR(path.as_ptr()), STGM_READ).unwrap();
+            let mut target = [0; 1024];
+            let mut icon = [0; 1024];
+            let mut index = 0;
+            link.GetPath(&mut target, std::ptr::null_mut(), SLGP_RAWPATH.0 as u32)
+                .unwrap();
+            link.GetIconLocation(&mut icon, &mut index).unwrap();
+            (
+                decode_wide_string(&target),
+                decode_wide_string(&icon),
+                index,
+            )
+        };
+        unsafe { CoUninitialize() };
+        result
+    }
+
+    fn decode_wide_string(value: &[u16]) -> String {
+        let length = value.iter().position(|c| *c == 0).unwrap();
+        String::from_utf16(&value[..length]).unwrap()
     }
 }

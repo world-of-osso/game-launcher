@@ -15,7 +15,7 @@ Release packaging and portable first-run integration. [Operation](../../README.m
 - `Cargo.toml`: cargo-packager NSIS configuration, current-user mode and app identity.
 - `.github/workflows/release.yml`: pinned cargo-packager tool and installer release artifact.
 - `build.rs`, `assets/world-of-osso.ico`: Windows executable/installer icon. The ICO is derived from the existing launcher `hero-bg.png`, with 16–256 pixel variants; `winresource` embeds it into Windows executables.
-- `src/windows_shortcut.rs`: portable GUI Start Menu integration using Windows Shell COM, with Unicode-safe child-process environment paths and explicit errors.
+- `src/windows_shortcut.rs`: portable GUI Start Menu integration using native UTF-16 `IShellLinkW`/`IPersistFile` through `windows`, with paired COM lifetime and explicit errors. Legacy scripting-host links fail on Unicode directory names.
 
 ## Tests asserting this spec
 

@@ -22,7 +22,7 @@ Use `game-launcher-<version>-windows-x86_64-setup.exe` for normal Windows instal
 
 The portable `.exe` remains available. Its first GUI run creates a per-user Start Menu shortcut when no portable/installer entry exists; an existing entry is preserved. CLI update/play commands do not create shortcuts. See [Windows installation contract](docs/specs/windows-installation.md).
 
-Build the release executable, then run `cargo packager --release --formats nsis --binaries-dir target/release --out-dir dist` with cargo-packager 0.11.8. CI uploads both portable and installer executables; publishing/tagging remains lead-owned. The only added Rust dependency, `winresource`, embeds the app icon in Windows executables. The ICO reuses the existing hero art.
+Build the release executable, then run `cargo packager --release --formats nsis --binaries-dir target/release --out-dir dist` with cargo-packager 0.11.8. CI uploads both portable and installer executables; publishing/tagging remains lead-owned. Windows-only dependencies: `winresource` embeds the app icon; `windows` exposes native UTF-16 Shell links without invoking the legacy scripting host. The ICO reuses the existing hero art.
 
 ## How it works
 
