@@ -16,6 +16,14 @@ cargo run          # dev mode
 cargo build --release
 ```
 
+## Windows installation
+
+Use `game-launcher-<version>-windows-x86_64-setup.exe` for normal Windows installation. The cargo-packager NSIS installer runs without elevation, installs into `%LOCALAPPDATA%\World of Osso`, creates the **World of Osso** Start Menu entry with the app icon, and registers an uninstaller in the current user's installed apps. Uninstall removes the launcher, shortcuts and registration, not `%APPDATA%\WorldOfOsso` game downloads.
+
+The portable `.exe` remains available. Its first GUI run creates a per-user Start Menu shortcut when no portable/installer entry exists; an existing entry is preserved. CLI update/play commands do not create shortcuts. See [Windows installation contract](docs/specs/windows-installation.md).
+
+Build the release executable, then run `cargo packager --release --formats nsis --binaries-dir target/release --out-dir dist` with cargo-packager 0.11.8. CI uploads both portable and installer executables; publishing/tagging remains lead-owned. The only added Rust dependency, `winresource`, embeds the app icon in Windows executables. The ICO reuses the existing hero art.
+
 ## How it works
 
 1. On launch, fetches `https://files.worldofosso.com/manifest.json`

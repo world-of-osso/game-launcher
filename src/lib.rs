@@ -8,6 +8,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub mod cache;
 mod disk;
 mod retry;
+#[cfg(windows)]
+pub mod windows_shortcut;
 
 pub const MAX_PARALLEL_DOWNLOADS: usize = 4;
 

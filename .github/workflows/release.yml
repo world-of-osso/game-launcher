@@ -53,6 +53,18 @@ jobs:
           cp "target/release/${{ matrix.binary }}" "$ARTIFACT"
           echo "ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
 
+      - name: Build per-user Windows installer
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cargo install cargo-packager --version 0.11.8 --locked
+          cargo packager --release --formats nsis --binaries-dir target/release --out-dir dist
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $installer = @(Get-ChildItem dist -Filter '*setup.exe' -Recurse)
+          if ($installer.Count -ne 1) { throw "Expected one Windows installer" }
+          $version = (cargo metadata --no-deps --format-version=1 -q | ConvertFrom-Json).packages[0].version
+          Copy-Item $installer[0].FullName "game-launcher-$version-windows-x86_64-setup.exe"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}

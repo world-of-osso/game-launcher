@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
@@ -52,6 +54,11 @@ fn main() {
             SCREENSHOT_PATH.set(output).unwrap();
         }
         _ => {}
+    }
+
+    #[cfg(windows)]
+    if let Err(error) = game_launcher::windows_shortcut::install_portable_start_menu_entry() {
+        eprintln!("ERROR: {error}");
     }
 
     dioxus::LaunchBuilder::desktop()

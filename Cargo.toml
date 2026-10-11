@@ -21,6 +21,23 @@ dioxus-debug = { git = "https://github.com/Osso/dioxus-debug.git", features = ["
 open = "5.3.3"
 base64 = "0.22.1"
 
+# Embed the same app icon in the Windows executable, installer and shell links.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[package.metadata.packager]
+product-name = "World of Osso"
+identifier = "com.worldofosso.launcher"
+publisher = "World of Osso"
+icons = ["assets/world-of-osso.ico"]
+formats = ["nsis"]
+out-dir = "dist"
+binaries = [{ path = "game-launcher", main = true }]
+
+[package.metadata.packager.nsis]
+install-mode = "currentUser"
+installer-icon = "assets/world-of-osso.ico"
+
 [features]
 default = ["desktop", "debug"]
 desktop = ["dioxus/desktop"]
