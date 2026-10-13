@@ -397,6 +397,24 @@ mod tests {
     }
 
     #[test]
+    fn updater_rejects_public_http_and_downgrade_redirects() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            assert!(validate_url(&reqwest::Url::parse("http://example.com/launcher.json").unwrap()).is_err());
+            assert!(validate_url(&reqwest::Url::parse("https://example.com/launcher.json").unwrap()).is_ok());
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/launcher.json", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).unwrap();
+                socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.com/insecure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            assert!(update_client().unwrap().get(url).send().await.unwrap_err().is_redirect());
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
     fn manifest_retries_transient_http_failure() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();

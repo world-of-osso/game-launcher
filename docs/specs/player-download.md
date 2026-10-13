@@ -39,12 +39,17 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - `src/lib.rs`: player transfer, hashing and regression tests.
 - `src/cache.rs`: verified receipts and subsecond mutation detection.
 - `src/disk.rs`: allocation-granularity-aware available-space preflight.
-- `src/main.rs`: manifest and shared UI/CLI synchronization integration.
+- `src/main.rs`: startup/periodic manifest and shared UI/CLI synchronization integration.
+- `src/self_update.rs`: platform-version selection, verified executable staging, replacement, startup handshake/rollback and recheck/Retry wait boundary.
+- `scripts/publish-launcher.py` (via `deploy.sh`): compatible per-platform manifest migration and executable-first/atomic-manifest publishing.
 
 ## Tests asserting this spec
 
 - `src/lib.rs::tests`: real local HTTP response, filesystem integrity, retry and disk-refusal boundaries.
 - `src/cache.rs::tests`: manifest-size and same-second rewrite invalidation.
+- `src/self_update.rs::tests`: fake HTTP integrity/refusal, HTTPS/redirect policy, semantic versions (including prereleases/build metadata), periodic/Retry waits, transient manifest retry and Windows rename-aside.
+- `tests/self_update_process.rs`: actual executable self-check followed by failed startup and rollback.
+- `scripts/test_launcher_manifest.py`: legacy consumer fields/mixed platform versions; `scripts/prove-self-update.py`: compiled old→new launcher replacement/restart and optional native Windows GUI periodic game refresh.
 - `src/scheduler_tests.rs`: overlapping downloads with a fixed concurrency bound.
 - `src/runtime_tests.rs`: missing spawn error, production read timeout, Windows long install path transfer/hash/extensionless PE spawn.
 

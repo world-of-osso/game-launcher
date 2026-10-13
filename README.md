@@ -75,6 +75,8 @@ HTTPS plus manifest SHA256 is the integrity model, not independent code signing.
 
 `cargo test --no-default-features --lib self_update` covers version ordering, fake HTTP size/hash rejection and Windows rename-aside behavior. `cargo test --no-default-features --test self_update_process` exercises a successful binary self-check followed by failed real relaunch/rollback. `python3 scripts/test_launcher_manifest.py` checks publication compatibility. CLI-only Linux builds use `cargo build --no-default-features`; shipped desktop defaults are unchanged.
 
+`python3 scripts/prove-self-update.py --proof-dir /owned/path` builds updater-enabled fixture versions 0.3.0 and the current version, serves a loopback manifest and proves atomic replacement, actual relaunch and backup cleanup. This fixture does not imply the historical disabled 0.3.0 can bootstrap itself. On native Windows add `--gui --periodic` from the logged-in interactive session: proves the real running-EXE rename, new App mount and changed game-file download after five minutes. Runner stops only its own launcher processes. Do not publish fixture binaries.
+
 ## Related
 
 - [file-server](../file-server) — generates the manifest
