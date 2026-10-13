@@ -55,6 +55,8 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 ## Known gaps (current cycle)
 
+- [x] Launcher self-update (2026-10-13): updater-enabled fixture 0.3.0→0.4.0 replaced/relaunched on Linux CLI and native Windows GUI. Windows rechecked both manifests and downloaded changed `proof.txt` at exactly five minutes; confirmed `.old` removed. Targeted tests: Linux updater 10/10, Windows updater 9/9, actual failed-start rollback 1/1 on each OS, publisher 2/2. Evidence: engine `data/diagnostics/launcher-self-update-2026-10-13/final-linux-flow.log`, `final-windows-gui-periodic.log`, and `final-*-rollback*.log`. Historical disabled 0.3.0 requires manual bootstrap; fixtures exercise the new updater at two compiled versions.
+
 - [x] Native Windows transfer tests10/10 at cbdb680: bounded scheduler, retry, nanos metadata/completed resume, disk-space refusal, body read timeout, spawn error and long install path PE spawn. Evidence: engine data/diagnostics/windows-release-2026-10-11/launcher-runtime-green-2.log.
 - [x] Native Windows normal-root LAN subset: actual launcher verification/download and entry reach Login→roster→authoritative InWorld; 9/9 terrain tiles loaded, no pending/failed tiles. DLL `99256a4f9` / frozen protocol `58e8ac9`, matching historical server master `0fd9d401`, private UDP54392; evidence in engine `data/diagnostics/windows-release-2026-10-11/final-frozen58-lan-proof.log` and `lan-release4-proof/`. Published player builds must use current master rather than the frozen proof artifacts.
 - [ ] Full published download/start and all-map/offline asset certification. LAN subset acceptance does not prove these.
