@@ -20,6 +20,16 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - [ ] Explicit LAN source/install-directory overrides permit isolated tests; normal launches use the production source and user data directory. CLI `play` forwards following arguments unchanged to the player so private-server proof uses the normal downloaded entry; GUI Play supplies no arguments.
 - [ ] Connect deadline is 10 seconds; read inactivity deadline is 30 seconds and resets after successful reads. No whole-asset deadline.
 
+### Launcher updates
+
+- [ ] Fetch a separate per-platform launcher manifest on startup and every five minutes while open; compare semantic versions per platform, never downgrade.
+- [ ] Each `platforms[linux-x86_64|windows-x86_64]` entry contains `version`, HTTPS `url`, `sha256`, `size`, and legacy website `file`. Top-level `version` remains for existing website consumers; updater ignores it for platform selection.
+- [ ] Verify launcher size and SHA256 before replacing anything. Linux installs by atomic rename; Windows renames current executable to `.old`, then installs new executable at the original path.
+- [ ] Require a bounded `--self-check` version handshake before installation and a startup acknowledgement after relaunch. Restore old executable on failed relaunch; delete confirmed `.old` on next startup.
+- [ ] Show launcher update errors with Retry without disabling the existing launcher's game download/play functionality.
+- [ ] Recheck game manifest every five minutes while open; Retry triggers a fresh check, not just a label change.
+- [ ] HTTPS plus manifest SHA256 is the integrity model. HTTP test sources are loopback-only. Publishing is lead-owned.
+
 ## How it works
 
 - [Operation and install paths](../../README.md#how-it-works).
@@ -47,5 +57,4 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 ## Out of scope
 
 - Launcher release/publishing: lead-owned.
-- Launcher self-update: disabled for this release, including manifests containing launcher metadata; per-platform digest schema and updater are deferred.
 - Byte-range partial-file resume: completed files must resume; incomplete files may restart.

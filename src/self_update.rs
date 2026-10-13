@@ -1,0 +1,385 @@
+//! Verified launcher replacement and restart.
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LauncherManifest {
+    pub version: String,
+    pub platforms: BTreeMap<String, LauncherRelease>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LauncherRelease {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    /// Retained for website download-link consumers.
+    pub file: String,
+}
+pub const MANIFEST_URL: &str = "https://worldofosso.com/downloads/launcher.json";
+pub const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub fn newer_version(candidate: &str, installed: &str) -> Result<bool, String> {
+    let parse = |value| {
+        semver::Version::parse(value).map_err(|e| format!("Invalid launcher version {value}: {e}"))
+    };
+    Ok(parse(candidate)? > parse(installed)?)
+}
+
+fn sibling(executable: &Path, suffix: &str) -> PathBuf {
+    let mut path = executable.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn validate_url(url: &reqwest::Url) -> Result<(), String> {
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        return Ok(());
+    }
+    Err(format!(
+        "Launcher updates require HTTPS (HTTP allowed only on loopback): {url}"
+    ))
+}
+
+pub fn update_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("Too many redirects");
+            }
+            match validate_url(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        }))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+pub async fn stage_release(
+    client: &reqwest::Client,
+    release: &LauncherRelease,
+    executable: &Path,
+) -> Result<PathBuf, String> {
+    validate_url(&reqwest::Url::parse(&release.url).map_err(|e| e.to_string())?)?;
+    if release.size == 0 || release.sha256.len() != 64 || hex::decode(&release.sha256).is_err() {
+        return Err("Invalid launcher size or SHA256".into());
+    }
+    let staged = sibling(executable, ".new");
+    let directory = executable
+        .parent()
+        .ok_or("Launcher has no parent directory")?;
+    let entry = crate::FileEntry {
+        path: staged
+            .file_name()
+            .ok_or("Launcher has no filename")?
+            .to_string_lossy()
+            .into_owned(),
+        sha256: release.sha256.clone(),
+        size: release.size,
+    };
+    crate::disk::prepare_download_space(directory, std::slice::from_ref(&entry)).await?;
+    // Remove only our previous stage; on Windows rename cannot replace an existing file.
+    remove_if_present(&staged)?;
+    crate::download_file(client, &release.url, directory, &entry).await?;
+    crate::ensure_executable(&staged)?;
+    Ok(staged)
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Remove {}: {e}", path.display())),
+    }
+}
+
+pub fn install_staged(executable: &Path, staged: &Path, windows: bool) -> Result<(), String> {
+    let backup = sibling(executable, ".old");
+    if backup.exists() {
+        return Err(format!(
+            "Previous launcher backup still exists: {}",
+            backup.display()
+        ));
+    }
+    if windows {
+        std::fs::rename(executable, &backup)
+    } else {
+        std::fs::hard_link(executable, &backup)
+    }
+    .map_err(|e| format!("Back up launcher: {e}"))?;
+    if let Err(e) = std::fs::rename(staged, executable) {
+        rollback(executable, windows)?;
+        return Err(format!("Install launcher: {e}"));
+    }
+    Ok(())
+}
+
+pub fn rollback(executable: &Path, windows: bool) -> Result<(), String> {
+    if windows {
+        remove_if_present(executable)?;
+    }
+    std::fs::rename(sibling(executable, ".old"), executable)
+        .map_err(|e| format!("Restore previous launcher: {e}"))
+}
+
+/// Self-check is a bounded real process handshake, not just a successful spawn.
+async fn check_binary(staged: &Path, version: &str) -> Result<(), String> {
+    let mut command = tokio::process::Command::new(staged);
+    command.arg("--self-check").kill_on_drop(true);
+    let output = tokio::time::timeout(START_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "New launcher self-check timed out".to_string())?
+        .map_err(|e| format!("Start new launcher self-check: {e}"))?;
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != version {
+        return Err("New launcher failed version/startup self-check".into());
+    }
+    Ok(())
+}
+
+/// Child acknowledges only after CLI startup or the GUI App component mounts.
+pub fn acknowledge_start(version: &str) -> Result<(), String> {
+    if let Some(path) = std::env::var_os("GAME_LAUNCHER_START_ACK") {
+        std::fs::write(path, version).map_err(|e| format!("Acknowledge launcher startup: {e}"))?;
+    }
+    Ok(())
+}
+
+pub fn cleanup_previous(executable: &Path, version: &str) -> Result<(), String> {
+    // The updater parent is still running from .old during the child handshake.
+    if std::env::var_os("GAME_LAUNCHER_START_ACK").is_some() {
+        return Ok(());
+    }
+    let ready = sibling(executable, ".ready");
+    if sibling(executable, ".old").exists() {
+        let confirmed = std::fs::read_to_string(&ready)
+            .map_err(|e| format!("Read launcher startup receipt: {e}"))?;
+        if confirmed != version {
+            return Err("Previous launcher update has no matching startup receipt".into());
+        }
+        remove_if_present(&sibling(executable, ".old"))?;
+    }
+    remove_if_present(&ready)
+}
+
+async fn wait_for_start(
+    child: &mut tokio::process::Child,
+    ready: &Path,
+    version: &str,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        if std::fs::read_to_string(ready).is_ok_and(|value| value == version) {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!(
+                "New launcher exited before startup handshake: {status}"
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("New launcher startup handshake timed out".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+pub async fn replace_and_restart(
+    executable: &Path,
+    staged: &Path,
+    version: &str,
+    arguments: &[std::ffi::OsString],
+) -> Result<(), String> {
+    check_binary(staged, version).await?;
+    let ready = sibling(executable, ".ready");
+    remove_if_present(&ready)?;
+    install_staged(executable, staged, cfg!(windows))?;
+    let result = async {
+        let mut child = tokio::process::Command::new(executable)
+            .args(arguments)
+            .env("GAME_LAUNCHER_START_ACK", &ready)
+            .spawn()
+            .map_err(|e| format!("Relaunch launcher: {e}"))?;
+        if let Err(error) = wait_for_start(&mut child, &ready, version).await {
+            if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                child
+                    .kill()
+                    .await
+                    .map_err(|e| format!("Stop failed launcher: {e}"))?;
+            }
+            return Err(error);
+        }
+        // Ownership passes to the restarted launcher only after acknowledgement.
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        rollback(executable, cfg!(windows))?;
+        remove_if_present(&ready)?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub async fn check_for_update(
+    executable: &Path,
+    installed: &str,
+    platform: &str,
+    manifest_url: &str,
+    arguments: &[std::ffi::OsString],
+) -> Result<bool, String> {
+    validate_url(&reqwest::Url::parse(manifest_url).map_err(|e| e.to_string())?)?;
+    let client = update_client()?;
+    let response = client
+        .get(manifest_url)
+        .send()
+        .await
+        .map_err(|e| format!("Fetch launcher manifest: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Launcher manifest: {e}"))?;
+    let manifest: LauncherManifest = response
+        .json()
+        .await
+        .map_err(|e| format!("Parse per-platform launcher manifest: {e}"))?;
+    let release = manifest
+        .platforms
+        .get(platform)
+        .ok_or_else(|| format!("No launcher release for {platform}"))?;
+    if !newer_version(&release.version, installed)? {
+        return Ok(false);
+    }
+    let staged = stage_release(&client, release, executable).await?;
+    let result = replace_and_restart(executable, &staged, &release.version, arguments).await;
+    if result.is_err() {
+        remove_if_present(&staged)?;
+    }
+    result.map(|()| true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+    fn directory() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "launcher-self-update-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+    fn serve(body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/binary", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).unwrap();
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            socket.write_all(&body).unwrap();
+        });
+        (url, handle)
+    }
+    #[test]
+    fn versions_compare_numerically_and_refuse_downgrades() {
+        assert!(newer_version("0.10.0", "0.3.0").unwrap());
+        assert!(!newer_version("0.3.0", "0.3.0").unwrap());
+        assert!(!newer_version("0.2.9", "0.3.0").unwrap());
+        assert!(newer_version("1.0.0", "0.99.9").unwrap());
+        assert!(newer_version("broken", "0.3.0").is_err());
+    }
+    #[test]
+    fn transfer_verifies_hash_and_size_before_touching_current() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = directory();
+            let executable = dir.join("launcher");
+            std::fs::write(&executable, b"current").unwrap();
+            for (body, size, hash, succeeds) in [
+                (
+                    b"new".to_vec(),
+                    3,
+                    hex::encode(Sha256::digest(b"new")),
+                    true,
+                ),
+                (
+                    b"bad".to_vec(),
+                    3,
+                    hex::encode(Sha256::digest(b"new")),
+                    false,
+                ),
+                (
+                    b"new".to_vec(),
+                    4,
+                    hex::encode(Sha256::digest(b"new")),
+                    false,
+                ),
+                (
+                    b"new".to_vec(),
+                    2,
+                    hex::encode(Sha256::digest(b"new")),
+                    false,
+                ),
+            ] {
+                let (url, server) = serve(body);
+                let release = LauncherRelease {
+                    version: "0.4.0".into(),
+                    url,
+                    sha256: hash,
+                    size,
+                    file: "launcher".into(),
+                };
+                let result =
+                    stage_release(&crate::http_client().unwrap(), &release, &executable).await;
+                assert_eq!(result.is_ok(), succeeds);
+                if succeeds {
+                    assert_eq!(std::fs::read(result.unwrap()).unwrap(), b"new");
+                }
+                assert_eq!(std::fs::read(&executable).unwrap(), b"current");
+                server.join().unwrap();
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+    #[test]
+    fn windows_rename_aside_and_rollback_preserve_current() {
+        let dir = directory();
+        let executable = dir.join("launcher.exe");
+        let staged = dir.join("new.exe");
+        std::fs::write(&executable, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        install_staged(&executable, &staged, true).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.join("launcher.exe.old")).unwrap(), b"old");
+        rollback(&executable, true).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn failed_install_restores_windows_current() {
+        let dir = directory();
+        let executable = dir.join("launcher.exe");
+        std::fs::write(&executable, b"old").unwrap();
+        assert!(install_staged(&executable, &dir.join("absent"), true).is_err());
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

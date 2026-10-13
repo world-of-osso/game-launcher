@@ -1352,6 +1352,7 @@ dependencies = [
  "httpdate",
  "open",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

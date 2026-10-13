@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub mod cache;
 mod disk;
 mod retry;
+pub mod self_update;
 #[cfg(windows)]
 pub mod windows_shortcut;
 
