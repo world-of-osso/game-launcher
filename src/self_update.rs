@@ -39,7 +39,7 @@ pub fn newer_version(candidate: &str, installed: &str) -> Result<bool, String> {
     let parse = |value| {
         semver::Version::parse(value).map_err(|e| format!("Invalid launcher version {value}: {e}"))
     };
-    Ok(parse(candidate)? > parse(installed)?)
+    Ok(parse(candidate)?.cmp_precedence(&parse(installed)?) == std::cmp::Ordering::Greater)
 }
 
 fn sibling(executable: &Path, suffix: &str) -> PathBuf {
@@ -468,6 +468,9 @@ mod tests {
         assert!(!newer_version("0.2.9", "0.3.0").unwrap());
         assert!(newer_version("1.0.0", "0.99.9").unwrap());
         assert!(newer_version("broken", "0.3.0").is_err());
+        assert!(!newer_version("1.0.0+z", "1.0.0+a").unwrap());
+        assert!(!newer_version("1.0.0-rc.1", "1.0.0").unwrap());
+        assert!(newer_version("1.0.0", "1.0.0-rc.1").unwrap());
     }
     #[test]
     fn transfer_verifies_hash_and_size_before_touching_current() {
