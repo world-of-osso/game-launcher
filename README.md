@@ -5,7 +5,8 @@ Desktop launcher that keeps game files in sync with the public R2 bucket at `htt
 ## Features
 
 - Downloads and verifies game files via SHA256 manifest
-- Launcher self-update disabled; new launcher versions require manual installation
+- Automatic verified launcher updates with rollback/restart
+- Rechecks launcher and game manifests every five minutes while open; Retry checks immediately
 - Conditional manifest fetching (ETag/Last-Modified) to avoid redundant downloads
 - Battle.net-inspired dark UI
 
@@ -26,10 +27,10 @@ Build the release executable, then run `cargo packager --release --formats nsis 
 
 ## How it works
 
-1. On launch, fetches `https://files.worldofosso.com/manifest.json`
-2. Compares local file SHA256 hashes against the manifest
-3. Downloads any missing or outdated files from `https://files.worldofosso.com/<path>`
-4. Launches the game engine binary
+1. On startup, checks `https://worldofosso.com/downloads/launcher.json` for a newer launcher for this platform.
+2. Downloads and verifies its size/SHA256, runs `--self-check`, replaces the executable and relaunches with the original arguments. Failed startup acknowledgement restores the old launcher; confirmed `.old` is deleted on the next check/start.
+3. Fetches `https://files.worldofosso.com/manifest.json`, compares local hashes and downloads missing/outdated game files.
+4. Rechecks both manifests every five minutes while open. Game/launcher errors have Retry; a launcher-update failure does not prevent downloading or playing the game.
 
 Game files are stored in `~/.local/share/WorldOfOsso/` (Linux) or the platform equivalent.
 
@@ -43,7 +44,36 @@ Set `GAME_LAUNCHER_BASE_URL` to the owned manifest server and `GAME_LAUNCHER_GAM
 
 Windows uses the normal `%APPDATA%/WorldOfOsso` install root. Long nested asset paths can transfer and verify, but Godot cannot start when the project/install root exceeds its Windows current-directory limit (approximately 260 characters). Do not use an overlong install root; no host registry changes or Godot CWD patch are provided.
 
-Launcher self-update is disabled in both GUI and CLI, even if a manifest contains launcher metadata. Install new launcher versions manually. The former update schema used one SHA256 for different platform executables; a per-platform schema and self-update are deferred.
+Launchers older than 0.4.0 have self-update disabled and need one manual installation of 0.4.0. Later updates are automatic, including CLI startup; `game-launcher self-update` explicitly checks/retries. The executable's directory must be writable by the current user. Linux atomically renames the staged executable over the original path (hard-linked `.old` backup). Windows moves the running executable to `.old`, installs at its original path and restarts. A bounded 15-second version self-check and a CLI-startup/GUI-mount acknowledgement gate success. This proves process startup, not every future UI action. Failed replacement/relaunch leaves the old launcher operational and reports an error.
+
+## Launcher publishing (lead-owned)
+
+`./deploy.sh` builds/publishes the native portable executable. To publish a prebuilt platform artifact: `./deploy.sh --platform windows-x86_64 --artifact /path/to/game-launcher.exe`. Add `--dry-run` to stage the merged manifest and print exact upload commands without publishing. Publisher requires Python 3.11+, SSH/scp and a prebuilt artifact or Cargo. Upload order: executable first, then `launcher.json.next`, then atomic manifest rename; previously published executables remain available.
+
+Each platform has its own version and integrity metadata (mixed release versions are allowed):
+
+```json
+{
+  "version": "0.4.0",
+  "platforms": {
+    "linux-x86_64": {
+      "version": "0.4.0",
+      "url": "https://worldofosso.com/downloads/game-launcher-0.4.0-linux-x86_64",
+      "sha256": "<64 lowercase hex characters>",
+      "size": 123456,
+      "file": "game-launcher-0.4.0-linux-x86_64"
+    }
+  }
+}
+```
+
+`windows-x86_64` uses the same fields and an `.exe` filename. Retain top-level `version`, per-platform `file` and any unrelated existing fields for published manifest consumers. Migration adds legacy platform versions from the previous top-level version and sizes from the actual published files. The updater never uses one global digest or the global version for platform comparison. The website's separate `/launcher.json` GitHub-release mirror (`tag_name`/`assets`) is unchanged; `/downloads/launcher.json` is this updater manifest.
+
+HTTPS plus manifest SHA256 is the integrity model, not independent code signing. `GAME_LAUNCHER_MANIFEST_URL` permits an isolated updater source; HTTP is allowed only on loopback (including redirects), never on a public/LAN HTTP host. `--self-check` prints the compiled version without opening the UI or networking.
+
+### Self-update proof
+
+`cargo test --no-default-features --lib self_update` covers version ordering, fake HTTP size/hash rejection and Windows rename-aside behavior. `cargo test --no-default-features --test self_update_process` exercises a successful binary self-check followed by failed real relaunch/rollback. `python3 scripts/test_launcher_manifest.py` checks publication compatibility. CLI-only Linux builds use `cargo build --no-default-features`; shipped desktop defaults are unchanged.
 
 ## Related
 

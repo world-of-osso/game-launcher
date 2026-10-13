@@ -2,11 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "desktop")]
 use dioxus::prelude::*;
-use game_launcher::FileEntry;
+use game_launcher::{FileEntry, self_update};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "desktop")]
 static SCREENSHOT_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+#[cfg(feature = "desktop")]
 static HERO_BG_DATA_URI: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     use base64::Engine;
     let bytes = include_bytes!("../assets/hero-bg.png");
@@ -25,6 +28,7 @@ struct Manifest {
     files: Vec<FileEntry>,
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone, Debug, PartialEq)]
 enum LauncherState {
     Checking,
@@ -39,14 +43,33 @@ enum LauncherState {
 }
 
 fn main() {
-    match std::env::args().nth(1).as_deref() {
-        Some("check-manifest") => return run_check_manifest(),
-        Some("self-update") => {
-            eprintln!("ERROR: Launcher self-update is disabled; install a new launcher manually.");
+    let command = std::env::args().nth(1);
+    if command.as_deref() == Some("--self-check") {
+        println!("{LAUNCHER_VERSION}");
+        return;
+    }
+    if matches!(
+        command.as_deref(),
+        Some("check-manifest" | "self-update" | "update" | "play")
+    ) {
+        if let Err(error) = self_update::acknowledge_start(LAUNCHER_VERSION) {
+            eprintln!("ERROR: {error}");
             std::process::exit(1);
         }
+        let runtime = tokio::runtime::Runtime::new().expect("Create updater runtime");
+        if let Err(error) = runtime.block_on(update_launcher()) {
+            eprintln!("Launcher update error (retry with self-update): {error}");
+            if command.as_deref() == Some("self-update") {
+                std::process::exit(1);
+            }
+        }
+    }
+    match command.as_deref() {
+        Some("check-manifest") => return run_check_manifest(),
+        Some("self-update") => return,
         Some("update") => return run_update(),
         Some("play") => return run_play(),
+        #[cfg(feature = "desktop")]
         Some("screenshot") => {
             let output = std::env::args()
                 .nth(2)
@@ -56,11 +79,18 @@ fn main() {
         _ => {}
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "desktop"))]
     if let Err(error) = game_launcher::windows_shortcut::install_portable_start_menu_entry() {
         eprintln!("ERROR: {error}");
     }
 
+    #[cfg(not(feature = "desktop"))]
+    {
+        eprintln!("Desktop UI requires the desktop feature; use update, play or self-update.");
+        std::process::exit(1);
+    }
+
+    #[cfg(feature = "desktop")]
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             dioxus::desktop::Config::new().with_window(
@@ -73,8 +103,33 @@ fn main() {
         .launch(App);
 }
 
+fn launcher_manifest_url() -> String {
+    std::env::var("GAME_LAUNCHER_MANIFEST_URL")
+        .unwrap_or_else(|_| self_update::MANIFEST_URL.to_owned())
+}
+
+async fn update_launcher() -> Result<(), String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("Find current launcher: {error}"))?;
+    self_update::cleanup_previous(&executable, LAUNCHER_VERSION)?;
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if self_update::check_for_update(
+        &executable,
+        LAUNCHER_VERSION,
+        platform_key(),
+        &launcher_manifest_url(),
+        &arguments,
+    )
+    .await?
+    {
+        std::process::exit(0);
+    }
+    Ok(())
+}
+
 // --- UI Components ---
 
+#[cfg(feature = "desktop")]
 #[component]
 fn App() -> Element {
     #[cfg(feature = "debug")]
@@ -87,15 +142,24 @@ fn App() -> Element {
     }
 
     let mut state = use_signal(|| LauncherState::Checking);
+    let mut launcher_error = use_signal(|| None::<String>);
     let progress_pct = use_signal(|| 0.0f64);
     let game_dir = game_directory();
 
-    use_future(move || {
-        let game_dir = game_dir.clone();
-        async move {
+    let recheck = use_coroutine(move |mut requests: UnboundedReceiver<()>| async move {
+        if let Err(error) = self_update::acknowledge_start(LAUNCHER_VERSION) {
+            state.set(LauncherState::Error(error));
+            return;
+        }
+        loop {
+            state.set(LauncherState::Checking);
+            launcher_error.set(update_launcher().await.err());
             match check_and_sync(&game_dir, state, progress_pct).await {
                 Ok(()) => state.set(LauncherState::Ready),
-                Err(e) => state.set(LauncherState::Error(e.to_string())),
+                Err(error) => state.set(LauncherState::Error(error)),
+            }
+            if !self_update::wait_for_recheck(&mut requests, self_update::RECHECK_INTERVAL).await {
+                break;
             }
         }
     });
@@ -105,11 +169,12 @@ fn App() -> Element {
         div { class: "launcher",
             TopBar {}
             HeroSection {}
-            BottomBar { state, progress_pct }
+            BottomBar { state, progress_pct, launcher_error, recheck }
         }
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
 fn TopBar() -> Element {
     rsx! {
@@ -122,6 +187,7 @@ fn TopBar() -> Element {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
 fn HeroSection() -> Element {
     let hero_bg = &*HERO_BG_DATA_URI;
@@ -140,6 +206,7 @@ fn HeroSection() -> Element {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
 fn NewsCard(
     tag: &'static str,
@@ -156,13 +223,25 @@ fn NewsCard(
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
-fn BottomBar(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element {
+fn BottomBar(
+    state: Signal<LauncherState>,
+    progress_pct: Signal<f64>,
+    launcher_error: Signal<Option<String>>,
+    recheck: Coroutine<()>,
+) -> Element {
     let current_state = state.read().clone();
     let pct = *progress_pct.read();
 
     rsx! {
         div { class: "bottom-bar",
+            if let Some(message) = launcher_error.read().as_ref() {
+                div { class: "error-row", role: "alert",
+                    span { class: "error-text", "Launcher update: {message}" }
+                    button { class: "retry-button", onclick: move |_| recheck.send(()), "Retry launcher update" }
+                }
+            }
             match current_state {
                 LauncherState::Checking => rsx! {
                     span { class: "status-text checking", "Checking for updates" }
@@ -178,7 +257,7 @@ fn BottomBar(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element
                         span { class: "error-text", "{msg}" }
                         button {
                             class: "retry-button",
-                            onclick: move |_| state.set(LauncherState::Checking),
+                            onclick: move |_| recheck.send(()),
                             "Retry"
                         }
                     }
@@ -191,6 +270,7 @@ fn BottomBar(state: Signal<LauncherState>, progress_pct: Signal<f64>) -> Element
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
 fn DownloadRow(current: String, done: usize, total: usize, pct: f64) -> Element {
     rsx! {
@@ -207,6 +287,7 @@ fn DownloadRow(current: String, done: usize, total: usize, pct: f64) -> Element 
     }
 }
 
+#[cfg(feature = "desktop")]
 #[component]
 fn PlayButton(state: Signal<LauncherState>) -> Element {
     rsx! {
@@ -418,6 +499,7 @@ async fn sync_downloads(
 
 // --- Sync orchestration ---
 
+#[cfg(feature = "desktop")]
 async fn check_and_sync(
     game_dir: &Path,
     state: Signal<LauncherState>,
@@ -435,6 +517,7 @@ async fn check_and_sync(
     sync_files(&client, game_dir, &needed, state, progress).await
 }
 
+#[cfg(feature = "desktop")]
 async fn sync_files(
     client: &reqwest::Client,
     game_dir: &Path,

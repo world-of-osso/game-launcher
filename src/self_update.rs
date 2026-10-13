@@ -21,6 +21,18 @@ pub struct LauncherRelease {
 }
 pub const MANIFEST_URL: &str = "https://worldofosso.com/downloads/launcher.json";
 pub const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The UI uses the same wait boundary for both manifests and explicit Retry.
+pub async fn wait_for_recheck<S>(requests: &mut S, interval: std::time::Duration) -> bool
+where
+    S: futures_util::Stream<Item = ()> + Unpin,
+{
+    use futures_util::StreamExt;
+    tokio::select! {
+        _ = tokio::time::sleep(interval) => true,
+        request = requests.next() => request.is_some(),
+    }
+}
 const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub fn newer_version(candidate: &str, installed: &str) -> Result<bool, String> {
@@ -154,7 +166,9 @@ pub fn acknowledge_start(version: &str) -> Result<(), String> {
 
 pub fn cleanup_previous(executable: &Path, version: &str) -> Result<(), String> {
     // The updater parent is still running from .old during the child handshake.
-    if std::env::var_os("GAME_LAUNCHER_START_ACK").is_some() {
+    static FIRST_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    let first_check = FIRST_CHECK.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if first_check && std::env::var_os("GAME_LAUNCHER_START_ACK").is_some() {
         return Ok(());
     }
     let ready = sibling(executable, ".ready");
@@ -299,6 +313,103 @@ mod tests {
         });
         (url, handle)
     }
+    #[test]
+    fn periodic_and_retry_waits_recheck_a_changed_http_manifest() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/manifest.json", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                for body in [
+                    b"first".as_slice(),
+                    b"second".as_slice(),
+                    b"retry".as_slice(),
+                ] {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let mut request = [0; 4096];
+                    socket.read(&mut request).unwrap();
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    socket.write_all(body).unwrap();
+                }
+            });
+            let client = update_client().unwrap();
+            assert_eq!(
+                client.get(&url).send().await.unwrap().text().await.unwrap(),
+                "first"
+            );
+            let mut requests = futures_util::stream::pending();
+            assert!(wait_for_recheck(&mut requests, std::time::Duration::from_millis(20)).await);
+            assert_eq!(
+                client.get(&url).send().await.unwrap().text().await.unwrap(),
+                "second"
+            );
+            let mut requests = futures_util::stream::iter([()]);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    wait_for_recheck(&mut requests, RECHECK_INTERVAL)
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                client.get(&url).send().await.unwrap().text().await.unwrap(),
+                "retry"
+            );
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn manifest_uses_platform_version_not_global_version() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let body = serde_json::json!({"version": "99.0.0", "platforms": {"linux-x86_64": {"version": "0.3.0", "file": "launcher", "url": "https://example.com/launcher", "sha256": "a".repeat(64), "size": 10}}});
+            let (url, server) = serve(serde_json::to_vec(&body).unwrap());
+            assert!(!check_for_update(Path::new("unused"), "0.4.0", "linux-x86_64", &url, &[]).await.unwrap());
+            server.join().unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_install_and_rollback_preserve_backup() {
+        let dir = directory();
+        let executable = dir.join("launcher");
+        let staged = dir.join("launcher.new");
+        std::fs::write(&executable, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        install_staged(&executable, &staged, false).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.join("launcher.old")).unwrap(), b"old");
+        rollback(&executable, false).unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"old");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn invalid_executable_never_replaces_current() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = directory();
+            let executable = dir.join("launcher");
+            let staged = dir.join("launcher.new");
+            std::fs::write(&executable, b"old").unwrap();
+            std::fs::write(&staged, b"not a binary").unwrap();
+            crate::ensure_executable(&staged).unwrap();
+            assert!(
+                replace_and_restart(&executable, &staged, "0.4.0", &[])
+                    .await
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&executable).unwrap(), b"old");
+            assert!(!dir.join("launcher.old").exists());
+            std::fs::remove_dir_all(dir).unwrap();
+        });
+    }
+
     #[test]
     fn versions_compare_numerically_and_refuse_downgrades() {
         assert!(newer_version("0.10.0", "0.3.0").unwrap());
