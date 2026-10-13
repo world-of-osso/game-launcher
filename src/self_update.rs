@@ -242,6 +242,48 @@ pub async fn replace_and_restart(
     Ok(())
 }
 
+async fn fetch_manifest_once(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<LauncherManifest, crate::retry::TransferFailure> {
+    use crate::retry::TransferFailure;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| TransferFailure::network(url, e))?;
+    if !response.status().is_success() {
+        return Err(TransferFailure::status(url, &response));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| TransferFailure::network(url, e))?;
+    serde_json::from_slice(&body)
+        .map_err(|e| format!("Parse per-platform launcher manifest: {e}").into())
+}
+
+async fn fetch_launcher_manifest(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<LauncherManifest, String> {
+    for attempt in 0..crate::MAX_DOWNLOAD_ATTEMPTS {
+        match fetch_manifest_once(client, url).await {
+            Ok(manifest) => return Ok(manifest),
+            Err(failure) => {
+                let Some(delay) = failure.retry_after else {
+                    return Err(failure.message);
+                };
+                if attempt + 1 == crate::MAX_DOWNLOAD_ATTEMPTS {
+                    return Err(failure.message);
+                }
+                tokio::time::sleep(crate::retry::retry_delay(attempt, delay)?).await;
+            }
+        }
+    }
+    unreachable!("download attempt limit must be positive")
+}
+
 pub async fn check_for_update(
     executable: &Path,
     installed: &str,
@@ -251,17 +293,7 @@ pub async fn check_for_update(
 ) -> Result<bool, String> {
     validate_url(&reqwest::Url::parse(manifest_url).map_err(|e| e.to_string())?)?;
     let client = update_client()?;
-    let response = client
-        .get(manifest_url)
-        .send()
-        .await
-        .map_err(|e| format!("Fetch launcher manifest: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Launcher manifest: {e}"))?;
-    let manifest: LauncherManifest = response
-        .json()
-        .await
-        .map_err(|e| format!("Parse per-platform launcher manifest: {e}"))?;
+    let manifest = fetch_launcher_manifest(&client, manifest_url).await?;
     let release = manifest
         .platforms
         .get(platform)
@@ -360,6 +392,25 @@ mod tests {
                 client.get(&url).send().await.unwrap().text().await.unwrap(),
                 "retry"
             );
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn manifest_retries_transient_http_failure() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/launcher.json", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                for status in ["503 Service Unavailable", "200 OK"] {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let mut request = [0; 4096];
+                    socket.read(&mut request).unwrap();
+                    let body = serde_json::json!({"version": "0.4.0", "platforms": {"linux-x86_64": {"version": "0.4.0", "file": "launcher", "url": "https://example.com/launcher", "sha256": "a".repeat(64), "size": 10}}}).to_string();
+                    write!(socket, "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            assert!(!check_for_update(Path::new("unused"), "0.4.0", "linux-x86_64", &url, &[]).await.unwrap());
             server.join().unwrap();
         });
     }
