@@ -17,7 +17,8 @@ import tomllib
 def build_versions(root, proof, gui):
     source = proof / 'source'
     shutil.copytree(root, source, ignore=shutil.ignore_patterns('.git', 'target', '__pycache__'), dirs_exist_ok=True)
-    original_toml = (source / 'Cargo.toml').read_text()
+    # Fixture snapshots may live beneath another Cargo workspace (evidence tree).
+    original_toml = (source / 'Cargo.toml').read_text() + '\n[workspace]\n'
     original_lock = (source / 'Cargo.lock').read_text()
     version = tomllib.loads(original_toml)['package']['version']
     extension = '.exe' if os.name == 'nt' else ''

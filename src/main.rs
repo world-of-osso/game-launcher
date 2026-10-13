@@ -146,20 +146,25 @@ fn App() -> Element {
     let progress_pct = use_signal(|| 0.0f64);
     let game_dir = game_directory();
 
-    let recheck = use_coroutine(move |mut requests: UnboundedReceiver<()>| async move {
-        if let Err(error) = self_update::acknowledge_start(LAUNCHER_VERSION) {
-            state.set(LauncherState::Error(error));
-            return;
-        }
-        loop {
-            state.set(LauncherState::Checking);
-            launcher_error.set(update_launcher().await.err());
-            match check_and_sync(&game_dir, state, progress_pct).await {
-                Ok(()) => state.set(LauncherState::Ready),
-                Err(error) => state.set(LauncherState::Error(error)),
+    let recheck = use_coroutine(move |mut requests: UnboundedReceiver<()>| {
+        let game_dir = game_dir.clone();
+        async move {
+            if let Err(error) = self_update::acknowledge_start(LAUNCHER_VERSION) {
+                state.set(LauncherState::Error(error));
+                return;
             }
-            if !self_update::wait_for_recheck(&mut requests, self_update::RECHECK_INTERVAL).await {
-                break;
+            loop {
+                state.set(LauncherState::Checking);
+                launcher_error.set(update_launcher().await.err());
+                match check_and_sync(&game_dir, state, progress_pct).await {
+                    Ok(()) => state.set(LauncherState::Ready),
+                    Err(error) => state.set(LauncherState::Error(error)),
+                }
+                if !self_update::wait_for_recheck(&mut requests, self_update::RECHECK_INTERVAL)
+                    .await
+                {
+                    break;
+                }
             }
         }
     });
