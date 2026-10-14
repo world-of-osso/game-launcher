@@ -12,7 +12,8 @@ pub mod self_update;
 #[cfg(windows)]
 pub mod windows_shortcut;
 
-pub const MAX_PARALLEL_DOWNLOADS: usize = 4;
+// Small assets are request-latency-bound; overlap requests without unbounded transfers.
+pub const MAX_PARALLEL_DOWNLOADS: usize = 32;
 
 pub async fn download_files(
     client: &reqwest::Client,

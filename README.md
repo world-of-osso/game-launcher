@@ -34,7 +34,7 @@ Build the release executable, then run `cargo packager --release --formats nsis 
 
 Game files are stored in `~/.local/share/WorldOfOsso/` (Linux) or the platform equivalent.
 
-Transfers use four concurrent workers, 10-second connect and 30-second read-inactivity deadlines, and allocation-aware disk-space preflight (`fs2`). Every file streams to a temporary path; size and SHA256 must match before replacement. Verified hashes are reused only when actual size and nanosecond modification time match. Completed files remain installed after a failed batch and are skipped on resume; incomplete files restart. UI and CLI share synchronization and report download/spawn errors.
+Transfers use at most 32 concurrent workers, 10-second connect and 30-second read-inactivity deadlines, and allocation-aware disk-space preflight (`fs2`). Every file streams to a temporary path; size and SHA256 must match before replacement. Verified hashes are reused only when actual size and nanosecond modification time match. Completed files remain installed after a failed batch and are skipped on resume; incomplete files restart. UI and CLI share synchronization and report download/spawn errors.
 
 ## Isolated LAN proof
 

@@ -14,7 +14,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 ### Scheduling and Windows
 
-- [ ] Download concurrently with a fixed bound; retry transient GET failures with bounded backoff and jitter, respecting Retry-After.
+- [x] Download concurrently with a fixed bound of 32 active transfers; retry transient GET failures with bounded backoff and jitter, respecting Retry-After.
 - [ ] UI and CLI use the same transfer/verification path, and expose errors rather than entering Ready/Launching on failure.
 - [ ] Windows supports its normal install directory and long nested asset paths without host registry/firewall changes. Godot launch from a project/install root exceeding its approximately 260-character CWD limit is not required; document that limitation.
 - [ ] Explicit LAN source/install-directory overrides permit isolated tests; normal launches use the production source and user data directory. CLI `play` forwards following arguments unchanged to the player so private-server proof uses the normal downloaded entry; GUI Play supplies no arguments.
@@ -50,7 +50,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - `src/self_update.rs::tests`: fake HTTP integrity/refusal, HTTPS/redirect policy, semantic versions (including prereleases/build metadata), periodic/Retry waits, transient manifest retry and Windows rename-aside.
 - `tests/self_update_process.rs`: actual executable self-check followed by failed startup and rollback.
 - `scripts/test_launcher_manifest.py`: legacy consumer fields/mixed platform versions; `scripts/prove-self-update.py`: compiled old→new launcher replacement/restart and optional native Windows GUI periodic game refresh.
-- `src/scheduler_tests.rs`: overlapping downloads with a fixed concurrency bound.
+- `src/scheduler_tests.rs`: 64 real HTTP transfers span multiple scheduling waves, require at least eight overlapping requests and never exceed the fixed concurrency bound; every installed file is verified.
 - `src/runtime_tests.rs`: missing spawn error, production read timeout, Windows long install path transfer/hash/extensionless PE spawn.
 
 ## Known gaps (current cycle)
