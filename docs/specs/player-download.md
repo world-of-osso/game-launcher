@@ -55,6 +55,8 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 ## Known gaps (current cycle)
 
+- [x] Native Windows bounded-transfer throughput (2026-10-14): 64-request overlap regression RED→GREEN; library22/22 PASS. Identical frozen R2 sample (2,000 random seed20261014 plus50 largest;2,050 files/3,488,299,952bytes) independently SHA256-verified before and after. Four transfers:204.922s/17.023MB/s;32 transfers:117.594s/29.664MB/s (1.74×). Evidence: engine `data/diagnostics/windows-final-flow-2026-10-14/{throughput-red.log,throughput-green.log,r2-sample-after-metrics.json,r2-sample-after-receipts.json}`. This sample does not prove full public transfer completion.
+
 - [x] Launcher self-update (2026-10-13): updater-enabled fixture 0.3.0→0.4.0 replaced/relaunched on Linux CLI and native Windows GUI. Windows rechecked both manifests and downloaded changed `proof.txt` at exactly five minutes; confirmed `.old` removed. Targeted tests: Linux updater 10/10, Windows updater 9/9, actual failed-start rollback 1/1 on each OS, publisher 2/2. Evidence: engine `data/diagnostics/launcher-self-update-2026-10-13/final-linux-flow.log`, `final-windows-gui-periodic.log`, and `final-*-rollback*.log`. Historical disabled 0.3.0 requires manual bootstrap; fixtures exercise the new updater at two compiled versions.
 
 - [x] Native Windows transfer tests10/10 at cbdb680: bounded scheduler, retry, nanos metadata/completed resume, disk-space refusal, body read timeout, spawn error and long install path PE spawn. Evidence: engine data/diagnostics/windows-release-2026-10-11/launcher-runtime-green-2.log.
