@@ -48,7 +48,7 @@ Launchers older than 0.4.0 have self-update disabled and need one manual install
 
 ## Launcher publishing (lead-owned)
 
-`./deploy.sh` builds/publishes the native portable executable. To publish a prebuilt platform artifact: `./deploy.sh --platform windows-x86_64 --artifact /path/to/game-launcher.exe`. Add `--dry-run` to stage the merged manifest and print exact upload commands without publishing. Publisher requires Python 3.11+, SSH/scp and a prebuilt artifact or Cargo. Upload order: executable first, then `launcher.json.next`, then atomic manifest rename; previously published executables remain available.
+`./deploy.sh` builds/publishes the native portable executable. To publish a prebuilt platform artifact: `./deploy.sh --platform windows-x86_64 --artifact /path/to/game-launcher.exe`. Add `--dry-run` to stage the merged manifest and print exact upload commands without publishing. Publisher requires Python 3.11+, SSH/scp and a prebuilt artifact or Cargo. The host serves `/var/lib/osso-website/downloads` through `DOWNLOADS_DIR`; NixOS owns the persistent `osso-website` state directory. The website's GitHub mirror `/launcher.json` must be bundled separately in its Nix package. Upload order: executable first, then `launcher.json.next`, then atomic manifest rename; previously published executables remain available.
 
 Each platform has its own version and integrity metadata (mixed release versions are allowed):
 
@@ -76,6 +76,12 @@ HTTPS plus manifest SHA256 is the integrity model, not independent code signing.
 `cargo test --no-default-features --lib self_update` covers version ordering, fake HTTP size/hash rejection and Windows rename-aside behavior. `cargo test --no-default-features --test self_update_process` exercises a successful binary self-check followed by failed real relaunch/rollback. `python3 scripts/test_launcher_manifest.py` checks publication compatibility. CLI-only Linux builds use `cargo build --no-default-features`; shipped desktop defaults are unchanged.
 
 `python3 scripts/prove-self-update.py --proof-dir /owned/path` builds updater-enabled fixture versions 0.3.0 and the current version, serves a loopback manifest and proves atomic replacement, actual relaunch and backup cleanup. This fixture does not imply the historical disabled 0.3.0 can bootstrap itself. On native Windows add `--gui --periodic` from the logged-in interactive session: proves the real running-EXE rename, new App mount and changed game-file download after five minutes. Runner stops only its own launcher processes. Do not publish fixture binaries.
+
+## Release 0.4.0
+
+The master branch already contains the unreleased 0.4.0 version bump (`40546ce`); live 0.3.0 cannot self-update. Install 0.4.0 once manually to enable the updater and 32 concurrent transfers.
+
+The tag workflow builds `cargo build --release --no-default-features --features desktop` on Linux, Windows and macOS. Windows adds cargo-packager 0.11.8 NSIS packaging; the portable executable, not the installer, is the updater payload. No signing step is configured. Tag push creates the GitHub release automatically; do not also run `gh release create` against the same tag. The updater manifest and website GitHub-release mirror are separate release steps. Publish payloads before the updater manifest, then atomically rename the manifest into place. The website's host flake must pin the new website commit, package its `launcher.json`, and use the persistent download directory.
 
 ## Related
 
