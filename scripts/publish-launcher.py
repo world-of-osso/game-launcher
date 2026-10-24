@@ -11,7 +11,7 @@ import shlex
 import subprocess
 import tomllib
 
-REMOTE = '/data/osso-website/downloads'
+REMOTE = '/var/lib/osso-website/downloads'
 BASE_URL = 'https://worldofosso.com/downloads'
 
 
