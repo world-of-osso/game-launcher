@@ -48,7 +48,7 @@ Launchers older than 0.4.0 have self-update disabled and need one manual install
 
 ## Launcher publishing (lead-owned)
 
-`./deploy.sh` builds/publishes the native portable executable. To publish a prebuilt platform artifact: `./deploy.sh --platform windows-x86_64 --artifact /path/to/game-launcher.exe`. Add `--dry-run` to stage the merged manifest and print exact upload commands without publishing. Publisher requires Python 3.11+, SSH/scp and a prebuilt artifact or Cargo. The host serves `/var/lib/osso-website/downloads` through `DOWNLOADS_DIR`; NixOS owns the persistent `osso-website` state directory. The website's GitHub mirror `/launcher.json` must be bundled separately in its Nix package. Upload order: executable first, then `launcher.json.next`, then atomic manifest rename; previously published executables remain available.
+`./deploy.sh` builds/publishes the native portable executable. To publish a prebuilt platform artifact: `./deploy.sh --platform windows-x86_64 --artifact /path/to/game-launcher.exe`. Add `--dry-run` to stage the merged manifest and print exact upload commands without publishing. Publisher requires Python 3.11+, SSH/scp and a prebuilt artifact or Cargo. The host serves `/var/lib/osso-website/downloads` through `DOWNLOADS_DIR`; NixOS owns the persistent `osso-website` state directory. The website's GitHub mirror `/launcher.json` must be bundled separately in its Nix package. Upload order: executable first, then `launcher.json.next`, then set both uploads to mode `0644` before the atomic manifest rename; previously published executables remain available.
 
 Each platform has its own version and integrity metadata (mixed release versions are allowed):
 

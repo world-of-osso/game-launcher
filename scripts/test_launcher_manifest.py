@@ -3,6 +3,9 @@ import hashlib
 import importlib.util
 import tempfile
 import unittest
+import shutil
+import subprocess
+from unittest.mock import patch
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location('publisher', Path(__file__).with_name('publish-launcher.py'))
@@ -34,6 +37,42 @@ class ManifestTests(unittest.TestCase):
             entry = {'version': '0.3.1', 'url': 'https://example.com/windows.exe', 'sha256': 'b' * 64, 'size': 10, 'file': 'game-launcher-0.3.1-windows-x86_64.exe'}
             manifest = publisher.merge_manifest({'version': '0.4.0', 'platforms': {'windows-x86_64': entry}}, '0.4.1', 'linux-x86_64', artifact, {})
             self.assertEqual(manifest['platforms']['windows-x86_64'], entry)
+
+
+class PublishPermissionsTests(unittest.TestCase):
+    def test_restrictive_uploads_are_readable_before_manifest_is_published(self):
+        for platform_key in ('linux-x86_64', 'windows-x86_64'):
+            with self.subTest(platform=platform_key), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'Cargo.toml').write_text('[package]\nversion = "0.4.0"\n')
+                artifact = root / 'launcher'
+                artifact.write_bytes(b'portable executable')
+                artifact.chmod(0o700)
+                remote = root / 'downloads'
+                local_run = subprocess.run
+
+                def execute_locally(command, **kwargs):
+                    if command[0] == 'scp':
+                        destination = command[2].split(':', 1)[1]
+                        destination = Path(destination.replace(publisher.REMOTE, str(remote)))
+                        shutil.copy2(command[1], destination)
+                        destination.chmod(0o700)
+                        return subprocess.CompletedProcess(command, 0)
+                    if command[2].startswith('if test'):
+                        return subprocess.CompletedProcess(command, 0, stdout='{}')
+                    if command[2] == 'mv':
+                        self.assertEqual((remote / 'launcher.json.next').stat().st_mode & 0o777, 0o644)
+                        for uploaded in remote.iterdir():
+                            self.assertEqual(uploaded.stat().st_mode & 0o777, 0o644)
+                    local_command = [arg.replace(publisher.REMOTE, str(remote)) for arg in command[2:]]
+                    return local_run(local_command, **kwargs)
+
+                argv = ['publish-launcher.py', '--artifact', str(artifact), '--platform', platform_key]
+                with patch.object(publisher, '__file__', str(root / 'scripts/publish-launcher.py')), patch('sys.argv', argv), patch.object(publisher.subprocess, 'run', side_effect=execute_locally):
+                    publisher.main()
+                self.assertEqual(artifact.stat().st_mode & 0o777, 0o700)
+                for uploaded in remote.iterdir():
+                    self.assertEqual(uploaded.stat().st_mode & 0o777, 0o644)
 
 
 if __name__ == '__main__':

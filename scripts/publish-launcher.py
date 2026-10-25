@@ -72,6 +72,7 @@ def main():
         ['ssh', 'sakuin', 'mkdir', '-p', REMOTE],
         ['scp', str(artifact), f'sakuin:{REMOTE}/{filename}'],
         ['scp', str(manifest_path), f'sakuin:{REMOTE}/launcher.json.next'],
+        ['ssh', 'sakuin', 'chmod', '0644', f'{REMOTE}/{filename}', f'{REMOTE}/launcher.json.next'],
         ['ssh', 'sakuin', 'mv', f'{REMOTE}/launcher.json.next', f'{REMOTE}/launcher.json'],
     ]
     for command in commands:
