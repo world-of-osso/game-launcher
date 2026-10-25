@@ -334,7 +334,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -358,7 +358,7 @@ mod tests {
                 ] {
                     let (mut socket, _) = listener.accept().unwrap();
                     let mut request = [0; 4096];
-                    socket.read(&mut request).unwrap();
+                    assert!(socket.read(&mut request).unwrap() > 0);
                     write!(
                         socket,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -406,7 +406,7 @@ mod tests {
             let server = std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).unwrap();
+                assert!(socket.read(&mut request).unwrap() > 0);
                 socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.com/insecure\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             });
             assert!(update_client().unwrap().get(url).send().await.unwrap_err().is_redirect());
@@ -423,7 +423,7 @@ mod tests {
                 for status in ["503 Service Unavailable", "200 OK"] {
                     let (mut socket, _) = listener.accept().unwrap();
                     let mut request = [0; 4096];
-                    socket.read(&mut request).unwrap();
+                    assert!(socket.read(&mut request).unwrap() > 0);
                     let body = serde_json::json!({"version": "0.4.0", "platforms": {"linux-x86_64": {"version": "0.4.0", "file": "launcher", "url": "https://example.com/launcher", "sha256": "a".repeat(64), "size": 10}}}).to_string();
                     write!(socket, "HTTP/1.1 {status}\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
