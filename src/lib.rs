@@ -277,7 +277,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -302,7 +302,7 @@ mod tests {
                         socket.set_nonblocking(false).unwrap();
                         socket.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
                         let mut request = [0; 4096];
-                        socket.read(&mut request).unwrap();
+                        assert!(socket.read(&mut request).unwrap() > 0);
                         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nexpected").unwrap();
                         return true;
                     }
@@ -339,7 +339,7 @@ mod tests {
                     socket.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
                     arrivals.push(start.elapsed());
                     let mut request = [0; 4096];
-                    socket.read(&mut request).unwrap();
+                    assert!(socket.read(&mut request).unwrap() > 0);
                     let response = if arrivals.len() == 1 {
                         b"HTTP/1.1 503 Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
                     } else {

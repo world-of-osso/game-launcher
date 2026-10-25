@@ -34,7 +34,7 @@ fn downloads_overlap_without_exceeding_the_parallel_bound() {
                 let peak = peak.clone();
                 replies.push(thread::spawn(move || {
                     let mut request = [0; 4096];
-                    socket.read(&mut request).unwrap();
+                    assert!(socket.read(&mut request).unwrap() > 0);
                     let count = active.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(count, Ordering::SeqCst);
                     thread::sleep(Duration::from_millis(100));

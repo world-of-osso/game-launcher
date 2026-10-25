@@ -39,7 +39,7 @@ fn production_client_stops_a_stalled_response_body() {
         let server = thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0);
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nx")
                 .unwrap();
