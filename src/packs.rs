@@ -355,9 +355,16 @@ async fn install_file(
                 let mut pack = tokio::fs::File::open(staging.join(&chunk.pack))
                     .await
                     .map_err(|e| format!("Open pack: {e}"))?;
-                pack.seek(std::io::SeekFrom::Start(chunk.offset))
+                pack.seek(std::io::SeekFrom::Start(chunk.offset - 4))
                     .await
                     .map_err(|e| format!("Seek pack: {e}"))?;
+                let mut length = [0; 4];
+                pack.read_exact(&mut length)
+                    .await
+                    .map_err(|e| format!("Read record length: {e}"))?;
+                if u32::from_le_bytes(length) as u64 != chunk.size {
+                    return Err(format!("Invalid record length for {}", entry.path));
+                }
                 pack.read_exact(&mut data)
                     .await
                     .map_err(|e| format!("Read chunk: {e}"))?
@@ -481,7 +488,7 @@ async fn fetch_chunks(
         groups.push(vec![chunk]);
     }
     for group in groups {
-        let start = group[0].offset;
+        let start = group[0].offset - 4;
         let end = group
             .iter()
             .map(|chunk| chunk.offset + chunk.size)
@@ -494,6 +501,10 @@ async fn fetch_chunks(
         };
         for chunk in group {
             let begin = (chunk.offset - start) as usize;
+            let length = u32::from_le_bytes(data[begin - 4..begin].try_into().unwrap());
+            if u64::from(length) != chunk.size {
+                return Err(format!("Invalid record length: {}", chunk.sha256));
+            }
             let body = &data[begin..begin + chunk.size as usize];
             if hex::encode(sha2::Sha256::digest(body)) != chunk.sha256 {
                 return Err(format!("Corrupt chunk: {}", chunk.sha256));

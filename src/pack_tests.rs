@@ -169,6 +169,43 @@ fn delta_fetches_ranges_and_reuses_verified_chunk_on_resume() {
 }
 
 #[test]
+fn rejects_incorrect_record_length_without_replacing_file() {
+    let mut bytes = b"OSSPACK\x01".to_vec();
+    bytes.extend_from_slice(&6u32.to_le_bytes());
+    bytes.extend_from_slice(b"hello");
+    let pack_hash = hex::encode(Sha256::digest(&bytes));
+    let mut entry = file("a");
+    entry["size"] = 5.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"hello")).into();
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":5,"pack":pack_hash,"offset":12,"pack_size":bytes.len()}]);
+    let manifest = manifest(serde_json::json!([entry]));
+    let dir = std::env::temp_dir().join(format!(
+        "pack-bad-record-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join(".pack-staging")).unwrap();
+    std::fs::write(dir.join(".pack-staging").join(pack_hash), &bytes).unwrap();
+    std::fs::write(dir.join("a"), b"old").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(sync_packs(
+        &crate::http_client().unwrap(),
+        "http://127.0.0.1:9",
+        &dir,
+        &manifest,
+        &["a".into()],
+        true,
+        |_, _| Ok(()),
+    ));
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"old");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn rejects_range_when_server_ignores_it() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
