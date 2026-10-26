@@ -43,7 +43,7 @@ fn rejects_unsafe_paths_and_windows_collisions() {
 }
 
 #[test]
-fn cold_install_fetches_and_verifies_a_pack() {
+fn cold_install_retries_transient_failure_and_verifies_a_pack() {
     let mut bytes = b"OSSPACK\x01".to_vec();
     bytes.extend_from_slice(&5u32.to_le_bytes());
     bytes.extend_from_slice(b"hello");
@@ -56,8 +56,11 @@ fn cold_install_fetches_and_verifies_a_pack() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let (mut failed, _) = listener.accept().unwrap();
         let mut request = [0u8; 2048];
+        failed.read(&mut request).unwrap();
+        failed.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
         let count = socket.read(&mut request).unwrap();
         assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /packs/"));
         write!(
@@ -162,6 +165,49 @@ fn delta_fetches_ranges_and_reuses_verified_chunk_on_resume() {
         ))
         .unwrap();
     assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"hello");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn rejects_range_when_server_ignores_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        socket.read(&mut request).unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nOSSPACK\x01",
+            )
+            .unwrap();
+    });
+    let mut entry = file("a");
+    entry["size"] = 1.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"x")).into();
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":1,"pack":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","offset":12,"pack_size":13}]);
+    let manifest = manifest(serde_json::json!([entry]));
+    let dir = std::env::temp_dir().join(format!(
+        "pack-bad-range-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(sync_packs(
+        &crate::http_client().unwrap(),
+        &format!("http://{address}"),
+        &dir,
+        &manifest,
+        &["a".into()],
+        false,
+        |_, _| Ok(()),
+    ));
+    server.join().unwrap();
+    assert!(result.unwrap_err().contains("Invalid range response"));
+    assert!(!dir.join("a").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

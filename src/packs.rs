@@ -231,17 +231,49 @@ async fn fetch_pack(
     hash: &str,
     size: u64,
 ) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
     if valid_pack(path, hash, size).await? {
         return Ok(());
     }
+    retry_get(|| fetch_pack_once(client, url, path, hash, size)).await
+}
+
+async fn retry_get<T, F, Fut>(mut request: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, crate::retry::TransferFailure>>,
+{
+    for attempt in 0..crate::MAX_DOWNLOAD_ATTEMPTS {
+        match request().await {
+            Ok(value) => return Ok(value),
+            Err(failure) => {
+                let Some(delay) = failure.retry_after else {
+                    return Err(failure.message);
+                };
+                if attempt + 1 == crate::MAX_DOWNLOAD_ATTEMPTS {
+                    return Err(failure.message);
+                }
+                tokio::time::sleep(crate::retry::retry_delay(attempt, delay)?).await;
+            }
+        }
+    }
+    unreachable!()
+}
+
+async fn fetch_pack_once(
+    client: &reqwest::Client,
+    url: &str,
+    path: &std::path::Path,
+    hash: &str,
+    size: u64,
+) -> Result<(), crate::retry::TransferFailure> {
+    use tokio::io::AsyncWriteExt;
     let mut response = client
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("Fetch pack {hash}: {e}"))?;
+        .map_err(|error| crate::retry::TransferFailure::network(hash, error))?;
     if !response.status().is_success() {
-        return Err(format!("Fetch pack {hash}: {}", response.status()));
+        return Err(crate::retry::TransferFailure::status(hash, &response));
     }
     let temporary = path.with_extension("part");
     let mut output = tokio::fs::File::create(&temporary)
@@ -251,13 +283,13 @@ async fn fetch_pack(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("Read pack {hash}: {e}"))?
+        .map_err(|error| crate::retry::TransferFailure::network(hash, error))?
     {
         count = count
             .checked_add(chunk.len() as u64)
-            .ok_or("Pack size overflow")?;
+            .ok_or_else(|| "Pack size overflow".to_owned())?;
         if count > size {
-            return Err(format!("Pack {hash} exceeds declared size"));
+            return Err(format!("Pack {hash} exceeds declared size").into());
         }
         output
             .write_all(&chunk)
@@ -270,7 +302,7 @@ async fn fetch_pack(
         .map_err(|e| format!("Flush pack {hash}: {e}"))?;
     drop(output);
     if !valid_pack(&temporary, hash, size).await? {
-        return Err(format!("Corrupt pack {hash}"));
+        return Err(format!("Corrupt pack {hash}").into());
     }
     tokio::fs::rename(&temporary, path)
         .await
@@ -486,12 +518,25 @@ async fn fetch_range(
     end: u64,
     total: u64,
 ) -> Result<Vec<u8>, String> {
+    retry_get(|| fetch_range_once(client, url, start, end, total)).await
+}
+
+async fn fetch_range_once(
+    client: &reqwest::Client,
+    url: &str,
+    start: u64,
+    end: u64,
+    total: u64,
+) -> Result<Vec<u8>, crate::retry::TransferFailure> {
     let mut response = client
         .get(url)
         .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
         .send()
         .await
-        .map_err(|e| format!("Fetch range: {e}"))?;
+        .map_err(|error| crate::retry::TransferFailure::network(url, error))?;
+    if !response.status().is_success() {
+        return Err(crate::retry::TransferFailure::status(url, &response));
+    }
     let expected = format!("bytes {start}-{end}/{total}");
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         || response
@@ -500,22 +545,22 @@ async fn fetch_range(
             .and_then(|h| h.to_str().ok())
             != Some(expected.as_str())
     {
-        return Err(format!("Invalid range response for {url}"));
+        return Err(format!("Invalid range response for {url}").into());
     }
     let mut data = Vec::new();
     let length = (end - start + 1) as usize;
     while let Some(bytes) = response
         .chunk()
         .await
-        .map_err(|e| format!("Read range: {e}"))?
+        .map_err(|error| crate::retry::TransferFailure::network(url, error))?
     {
         if data.len() + bytes.len() > length {
-            return Err("Range exceeds declared size".into());
+            return Err("Range exceeds declared size".to_owned().into());
         }
         data.extend_from_slice(&bytes);
     }
     if data.len() != length {
-        return Err("Truncated range".into());
+        return Err("Truncated range".to_owned().into());
     }
     Ok(data)
 }
