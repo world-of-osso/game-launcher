@@ -210,6 +210,7 @@ pub async fn sync_packs(
         }
     }
     crate::disk::prepare_pack_space(game_dir, &space).await?;
+    reject_running_game(game_dir)?;
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| format!("Create staging directory: {e}"))?;
@@ -230,6 +231,7 @@ pub async fn sync_packs(
     .buffer_unordered(crate::MAX_PARALLEL_DOWNLOADS)
     .try_collect::<Vec<_>>()
     .await?;
+    reject_running_game(game_dir)?;
     let whole_packs: HashSet<String> = fetched
         .into_iter()
         .filter_map(|(hash, complete)| complete.then_some(hash))
@@ -417,8 +419,47 @@ async fn install_file(
     }
     tokio::fs::rename(&partial, &destination)
         .await
-        .map_err(|e| format!("Install {}: {e}", destination.display()))?;
+        .map_err(|error| install_error(&destination, error, cfg!(windows)))?;
     Ok(())
+}
+
+pub fn reject_running_game(game_dir: &std::path::Path) -> Result<(), String> {
+    let root = std::fs::canonicalize(game_dir)
+        .map_err(|error| format!("Resolve {}: {error}", game_dir.display()))?;
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    for process in system.processes().values() {
+        if let Some(executable) = process.exe() {
+            #[cfg(windows)]
+            let matches = std::path::PathBuf::from(executable.to_string_lossy().to_lowercase())
+                .starts_with(std::path::PathBuf::from(
+                    root.to_string_lossy().to_lowercase(),
+                ));
+            #[cfg(not(windows))]
+            let matches = executable.starts_with(&root);
+            if matches {
+                return Err(format!(
+                    "The game is running ({}); close it before updating",
+                    executable.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn install_error(
+    path: &std::path::Path,
+    error: std::io::Error,
+    windows: bool,
+) -> String {
+    if windows && matches!(error.raw_os_error(), Some(5 | 32)) {
+        return format!(
+            "The game is running or the file is locked; close the game and retry installing {}: {error}",
+            path.display()
+        );
+    }
+    format!("Install {}: {error}", path.display())
 }
 
 fn reject_symlinks(root: &std::path::Path, relative: &str) -> Result<(), String> {

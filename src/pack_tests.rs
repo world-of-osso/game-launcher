@@ -1,4 +1,4 @@
-use crate::packs::{PackManifest, sync_packs};
+use crate::packs::{PackManifest, install_error, sync_packs};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -211,6 +211,98 @@ fn rejects_incorrect_record_length_without_replacing_file() {
     assert!(result.is_err());
     assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"old");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn refuses_install_while_game_executable_is_running() {
+    let dir = std::env::temp_dir().join(format!(
+        "pack-running-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join("runtime")).unwrap();
+    let executable = dir.join("runtime/godot");
+    std::fs::copy("/usr/bin/sleep", &executable).unwrap();
+    let mut process = std::process::Command::new(
+        "/home/osso/Projects/world-of-osso/game-engine/scripts/agent/agent-run",
+    )
+    .args(["packrunningtest", executable.to_str().unwrap(), "10"])
+    .spawn()
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let manifest = manifest(serde_json::json!([file("a")]));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(sync_packs(
+        &crate::http_client().unwrap(),
+        "http://127.0.0.1:9",
+        &dir,
+        &manifest,
+        &["a".into()],
+        true,
+        |_, _| Ok(()),
+    ));
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "stop", "agents-packrunningtest.slice"])
+        .status();
+    let _ = process.wait();
+    assert!(result.unwrap_err().contains("game is running"));
+    assert!(!dir.join("a").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_replacement_retains_verified_pack_for_resume() {
+    let mut bytes = b"OSSPACK\x01".to_vec();
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(b"hello");
+    let pack_hash = hex::encode(Sha256::digest(&bytes));
+    let mut entry = file("a");
+    entry["size"] = 5.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"hello")).into();
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":5,"pack":pack_hash,"offset":12,"pack_size":bytes.len()}]);
+    let manifest = manifest(serde_json::json!([entry]));
+    let dir = std::env::temp_dir().join(format!(
+        "pack-locked-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join(".pack-staging")).unwrap();
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    let pack = dir.join(".pack-staging").join(pack_hash);
+    std::fs::write(&pack, &bytes).unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(sync_packs(
+        &crate::http_client().unwrap(),
+        "http://127.0.0.1:9",
+        &dir,
+        &manifest,
+        &["a".into()],
+        true,
+        |_, _| Ok(()),
+    ));
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(pack).unwrap(), bytes);
+    assert!(dir.join("a").is_dir());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn reports_windows_sharing_and_access_denied_as_running_game() {
+    for code in [5, 32] {
+        let error = install_error(
+            std::path::Path::new("asset"),
+            std::io::Error::from_raw_os_error(code),
+            true,
+        );
+        assert!(error.contains("game is running"), "{error}");
+    }
 }
 
 #[test]

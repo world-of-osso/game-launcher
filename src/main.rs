@@ -520,6 +520,7 @@ async fn sync_downloads(
     cold: bool,
     mut progress: impl FnMut(&FileEntry, usize),
 ) -> Result<(), String> {
+    game_launcher::packs::reject_running_game(game_dir)?;
     let mut cache = game_launcher::cache::FileHashCache::load(game_dir)?;
     let mut completed = |entry: &FileEntry, count| {
         cache.record_verified(game_dir, entry)?;
