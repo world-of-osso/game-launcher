@@ -58,7 +58,7 @@ fn cold_install_retries_transient_failure_and_verifies_a_pack() {
     let server = std::thread::spawn(move || {
         let (mut failed, _) = listener.accept().unwrap();
         let mut request = [0u8; 2048];
-        failed.read(&mut request).unwrap();
+        assert!(failed.read(&mut request).unwrap() > 0);
         failed.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 0\r\nConnection: close\r\n\r\n").unwrap();
         let (mut socket, _) = listener.accept().unwrap();
         let count = socket.read(&mut request).unwrap();
@@ -312,7 +312,7 @@ fn rejects_range_when_server_ignores_it() {
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         let mut request = [0u8; 2048];
-        socket.read(&mut request).unwrap();
+        assert!(socket.read(&mut request).unwrap() > 0);
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nOSSPACK\x01",
