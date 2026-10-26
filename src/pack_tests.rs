@@ -1,4 +1,8 @@
-use crate::packs::PackManifest;
+use crate::packs::{PackManifest, sync_packs};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn manifest(files: serde_json::Value) -> PackManifest {
     serde_json::from_value(serde_json::json!({
@@ -36,6 +40,57 @@ fn rejects_unsafe_paths_and_windows_collisions() {
             .validate()
             .is_err()
     );
+}
+
+#[test]
+fn cold_install_fetches_and_verifies_a_pack() {
+    let mut bytes = b"OSSPACK\x01".to_vec();
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(b"hello");
+    let pack_hash = hex::encode(Sha256::digest(&bytes));
+    let mut entry = file("dir/a");
+    entry["size"] = 5.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"hello")).into();
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":5,"pack":pack_hash,"offset":12,"pack_size":bytes.len()}]);
+    let manifest = manifest(serde_json::json!([entry]));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let count = socket.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /packs/"));
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .unwrap();
+        socket.write_all(&bytes).unwrap();
+    });
+    let dir = std::env::temp_dir().join(format!(
+        "pack-test-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(sync_packs(
+            &crate::http_client().unwrap(),
+            &format!("http://{address}"),
+            &dir,
+            &manifest,
+            &["dir/a".into()],
+            true,
+            |_, _| Ok(()),
+        ))
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(std::fs::read(dir.join("dir/a")).unwrap(), b"hello");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

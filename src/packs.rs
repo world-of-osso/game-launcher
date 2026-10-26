@@ -1,5 +1,6 @@
 //! Versioned content-addressed player packs.
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,4 +126,193 @@ impl PackManifest {
         }
         Ok(())
     }
+}
+
+/// Download referenced immutable packs, then reconstruct verified files.
+pub async fn sync_packs(
+    client: &reqwest::Client,
+    base_url: &str,
+    game_dir: &std::path::Path,
+    manifest: &PackManifest,
+    needed: &[String],
+    _cold: bool,
+    mut completed: impl FnMut(&crate::FileEntry, usize) -> Result<(), String>,
+) -> Result<(), String> {
+    use futures_util::stream::{self, StreamExt, TryStreamExt};
+    manifest.validate()?;
+    let requested: HashSet<&str> = needed.iter().map(String::as_str).collect();
+    let files: Vec<_> = manifest
+        .files
+        .iter()
+        .filter(|file| requested.contains(file.path.as_str()))
+        .collect();
+    if files.len() != requested.len() {
+        return Err("Requested file is absent from pack manifest".into());
+    }
+    let mut packs = HashMap::new();
+    for file in &files {
+        for chunk in &file.chunks {
+            packs.insert(chunk.pack.clone(), chunk.pack_size);
+        }
+    }
+    let mut space: Vec<crate::FileEntry> = files
+        .iter()
+        .map(|file| crate::FileEntry {
+            path: file.path.clone(),
+            sha256: file.sha256.clone(),
+            size: file.size,
+        })
+        .collect();
+    space.extend(packs.iter().map(|(hash, size)| crate::FileEntry {
+        path: format!(".pack-staging/{hash}"),
+        sha256: hash.clone(),
+        size: *size,
+    }));
+    crate::disk::prepare_download_space(game_dir, &space).await?;
+    let staging = game_dir.join(".pack-staging");
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|e| format!("Create staging directory: {e}"))?;
+    stream::iter(packs.into_iter().map(|(hash, size)| {
+        let path = staging.join(&hash);
+        let url = format!("{base_url}/packs/{hash}");
+        async move { fetch_pack(client, &url, &path, &hash, size).await }
+    }))
+    .buffer_unordered(crate::MAX_PARALLEL_DOWNLOADS)
+    .try_collect::<Vec<_>>()
+    .await?;
+    for (index, file) in files.iter().enumerate() {
+        install_file(game_dir, &staging, file).await?;
+        completed(
+            &crate::FileEntry {
+                path: file.path.clone(),
+                sha256: file.sha256.clone(),
+                size: file.size,
+            },
+            index + 1,
+        )?;
+    }
+    Ok(())
+}
+
+async fn fetch_pack(
+    client: &reqwest::Client,
+    url: &str,
+    path: &std::path::Path,
+    hash: &str,
+    size: u64,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    if valid_pack(path, hash, size).await? {
+        return Ok(());
+    }
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Fetch pack {hash}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Fetch pack {hash}: {}", response.status()));
+    }
+    let temporary = path.with_extension("part");
+    let mut output = tokio::fs::File::create(&temporary)
+        .await
+        .map_err(|e| format!("Create {}: {e}", temporary.display()))?;
+    let mut count = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Read pack {hash}: {e}"))?
+    {
+        count = count
+            .checked_add(chunk.len() as u64)
+            .ok_or("Pack size overflow")?;
+        if count > size {
+            return Err(format!("Pack {hash} exceeds declared size"));
+        }
+        output
+            .write_all(&chunk)
+            .await
+            .map_err(|e| format!("Write pack {hash}: {e}"))?;
+    }
+    output
+        .flush()
+        .await
+        .map_err(|e| format!("Flush pack {hash}: {e}"))?;
+    drop(output);
+    if !valid_pack(&temporary, hash, size).await? {
+        return Err(format!("Corrupt pack {hash}"));
+    }
+    tokio::fs::rename(&temporary, path)
+        .await
+        .map_err(|e| format!("Stage pack {hash}: {e}"))?;
+    Ok(())
+}
+
+async fn valid_pack(path: &std::path::Path, hash: &str, size: u64) -> Result<bool, String> {
+    use tokio::io::AsyncReadExt;
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("Open {}: {error}", path.display())),
+    };
+    if file.metadata().await.map_err(|e| e.to_string())?.len() != size {
+        return Ok(false);
+    }
+    let mut magic = [0; 8];
+    if file.read_exact(&mut magic).await.is_err() || &magic != b"OSSPACK\x01" {
+        return Ok(false);
+    }
+    Ok(crate::hash_file(path).await.map_err(|e| e.to_string())? == hash)
+}
+
+async fn install_file(
+    game_dir: &std::path::Path,
+    staging: &std::path::Path,
+    entry: &PackFile,
+) -> Result<(), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+    let destination = game_dir.join(&entry.path);
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Create {}: {e}", parent.display()))?;
+    }
+    let partial = crate::partial_path(&destination);
+    let mut output = tokio::fs::File::create(&partial)
+        .await
+        .map_err(|e| format!("Create {}: {e}", partial.display()))?;
+    let mut file_hash = sha2::Sha256::new();
+    for chunk in &entry.chunks {
+        let mut pack = tokio::fs::File::open(staging.join(&chunk.pack))
+            .await
+            .map_err(|e| format!("Open pack: {e}"))?;
+        pack.seek(std::io::SeekFrom::Start(chunk.offset))
+            .await
+            .map_err(|e| format!("Seek pack: {e}"))?;
+        let mut data = vec![0; chunk.size as usize];
+        pack.read_exact(&mut data)
+            .await
+            .map_err(|e| format!("Read chunk: {e}"))?;
+        if hex::encode(sha2::Sha256::digest(&data)) != chunk.sha256 {
+            return Err(format!("Corrupt chunk for {}", entry.path));
+        }
+        file_hash.update(&data);
+        output
+            .write_all(&data)
+            .await
+            .map_err(|e| format!("Write {}: {e}", partial.display()))?;
+    }
+    output
+        .flush()
+        .await
+        .map_err(|e| format!("Flush {}: {e}", partial.display()))?;
+    drop(output);
+    if hex::encode(file_hash.finalize()) != entry.sha256 {
+        return Err(format!("File digest mismatch: {}", entry.path));
+    }
+    tokio::fs::rename(&partial, &destination)
+        .await
+        .map_err(|e| format!("Install {}: {e}", destination.display()))?;
+    Ok(())
 }
