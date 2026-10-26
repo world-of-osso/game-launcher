@@ -227,12 +227,10 @@ fn refuses_install_while_game_executable_is_running() {
     std::fs::create_dir_all(dir.join("runtime")).unwrap();
     let executable = dir.join("runtime/godot");
     std::fs::copy("/usr/bin/sleep", &executable).unwrap();
-    let mut process = std::process::Command::new(
-        "/home/osso/Projects/world-of-osso/game-engine/scripts/agent/agent-run",
-    )
-    .args(["packrunningtest", executable.to_str().unwrap(), "10"])
-    .spawn()
-    .unwrap();
+    let mut process = std::process::Command::new(&executable)
+        .arg("10")
+        .spawn()
+        .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(300));
     let manifest = manifest(serde_json::json!([file("a")]));
     let runtime = tokio::runtime::Runtime::new().unwrap();
