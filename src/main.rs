@@ -26,6 +26,8 @@ const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Manifest {
     version: String,
     files: Vec<FileEntry>,
+    #[serde(skip)]
+    packs: Option<game_launcher::packs::PackManifest>,
 }
 
 #[cfg(feature = "desktop")]
@@ -455,6 +457,35 @@ async fn fetch_manifest(
 
 /// Resolve manifest, using cache on 304.
 async fn resolve_manifest(client: &reqwest::Client) -> Result<Manifest, String> {
+    let response = client
+        .get(file_url("manifest-v2.json"))
+        .send()
+        .await
+        .map_err(|error| format!("Fetch v2 manifest: {error}"))?;
+    if response.status() != reqwest::StatusCode::NOT_FOUND {
+        if !response.status().is_success() {
+            return Err(format!("Fetch v2 manifest: {}", response.status()));
+        }
+        let packs: game_launcher::packs::PackManifest = response
+            .json()
+            .await
+            .map_err(|error| format!("Parse v2 manifest: {error}"))?;
+        packs.validate()?;
+        let files = packs
+            .files
+            .iter()
+            .map(|file| FileEntry {
+                path: file.path.clone(),
+                size: file.size,
+                sha256: file.sha256.clone(),
+            })
+            .collect();
+        return Ok(Manifest {
+            version: "2".into(),
+            files,
+            packs: Some(packs),
+        });
+    }
     let cached = load_manifest_cache();
     match fetch_manifest(client, cached.as_ref()).await? {
         Some(m) => Ok(m),
@@ -485,16 +516,34 @@ async fn sync_downloads(
     client: &reqwest::Client,
     game_dir: &Path,
     needed: &[FileEntry],
+    manifest: &Manifest,
+    cold: bool,
     mut progress: impl FnMut(&FileEntry, usize),
 ) -> Result<(), String> {
     let mut cache = game_launcher::cache::FileHashCache::load(game_dir)?;
-    let result =
-        game_launcher::download_files(client, &base_url(), game_dir, needed, |entry, count| {
-            cache.record_verified(game_dir, entry)?;
-            progress(entry, count);
-            Ok(())
-        })
-        .await;
+    let mut completed = |entry: &FileEntry, count| {
+        cache.record_verified(game_dir, entry)?;
+        progress(entry, count);
+        Ok(())
+    };
+    let result = if let Some(packs) = &manifest.packs {
+        let paths = needed
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        game_launcher::packs::sync_packs(
+            client,
+            &base_url(),
+            game_dir,
+            packs,
+            &paths,
+            cold,
+            &mut completed,
+        )
+        .await
+    } else {
+        game_launcher::download_files(client, &base_url(), game_dir, needed, &mut completed).await
+    };
     match (result, cache.save(game_dir)) {
         (Err(transfer), Err(save)) => Err(format!("{transfer}; {save}")),
         (Err(error), _) | (_, Err(error)) => Err(error),
@@ -519,7 +568,10 @@ async fn check_and_sync(
         return Ok(());
     }
 
-    sync_files(&client, game_dir, &needed, state, progress).await
+    let cold = files
+        .iter()
+        .all(|entry| !game_dir.join(&entry.path).exists());
+    sync_files(&client, game_dir, &needed, &manifest, cold, state, progress).await
 }
 
 #[cfg(feature = "desktop")]
@@ -527,6 +579,8 @@ async fn sync_files(
     client: &reqwest::Client,
     game_dir: &Path,
     needed: &[FileEntry],
+    manifest: &Manifest,
+    cold: bool,
     mut state: Signal<LauncherState>,
     mut progress: Signal<f64>,
 ) -> Result<(), String> {
@@ -535,7 +589,7 @@ async fn sync_files(
         done: 0,
         total: needed.len(),
     });
-    sync_downloads(client, game_dir, needed, |entry, done| {
+    sync_downloads(client, game_dir, needed, manifest, cold, |entry, done| {
         state.set(LauncherState::Downloading {
             current: entry.path.clone(),
             done,
@@ -606,7 +660,10 @@ fn run_update() {
         }
 
         println!("Downloading {}/{} files...", needed.len(), files.len());
-        cli_download_files(&client, &game_dir, &needed).await;
+        let cold = files
+            .iter()
+            .all(|entry| !game_dir.join(&entry.path).exists());
+        cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
         println!("Done");
     });
 }
@@ -633,7 +690,10 @@ fn run_play() {
             });
         if !needed.is_empty() {
             println!("Updating {}/{} files...", needed.len(), files.len());
-            cli_download_files(&client, &game_dir, &needed).await;
+            let cold = files
+                .iter()
+                .all(|entry| !game_dir.join(&entry.path).exists());
+            cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
         }
 
         println!("Launching...");
@@ -645,8 +705,14 @@ fn run_play() {
     });
 }
 
-async fn cli_download_files(client: &reqwest::Client, game_dir: &Path, needed: &[FileEntry]) {
-    if let Err(error) = sync_downloads(client, game_dir, needed, |entry, done| {
+async fn cli_download_files(
+    client: &reqwest::Client,
+    game_dir: &Path,
+    needed: &[FileEntry],
+    manifest: &Manifest,
+    cold: bool,
+) {
+    if let Err(error) = sync_downloads(client, game_dir, needed, manifest, cold, |entry, done| {
         println!("  [{}/{}] {}", done, needed.len(), entry.path);
     })
     .await
