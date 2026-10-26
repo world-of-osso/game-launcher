@@ -149,6 +149,10 @@ pub async fn sync_packs(
     if files.len() != requested.len() {
         return Err("Requested file is absent from pack manifest".into());
     }
+    reject_symlinks(game_dir, ".pack-staging")?;
+    for file in &files {
+        reject_symlinks(game_dir, &file.path)?;
+    }
     let mut packs: HashMap<String, Vec<PackChunk>> = HashMap::new();
     for file in &files {
         for chunk in &file.chunks {
@@ -303,10 +307,7 @@ async fn install_file(
             .await
             .map_err(|e| format!("Create {}: {e}", parent.display()))?;
     }
-    let partial = crate::partial_path(&destination);
-    let mut output = tokio::fs::File::create(&partial)
-        .await
-        .map_err(|e| format!("Create {}: {e}", partial.display()))?;
+    let (partial, mut output) = create_install_partial(&destination).await?;
     let mut file_hash = sha2::Sha256::new();
     for chunk in &entry.chunks {
         let chunk_path = staging
@@ -352,6 +353,45 @@ async fn install_file(
         .await
         .map_err(|e| format!("Install {}: {e}", destination.display()))?;
     Ok(())
+}
+
+fn reject_symlinks(root: &std::path::Path, relative: &str) -> Result<(), String> {
+    let mut path = root.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Symlink in install path: {}", path.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("Stat {}: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+async fn create_install_partial(
+    destination: &std::path::Path,
+) -> Result<(std::path::PathBuf, tokio::fs::File), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = destination.parent().ok_or("Destination has no parent")?;
+    for _ in 0..100 {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".osso-pack-{}-{number}.part", std::process::id()));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Create {}: {error}", path.display())),
+        }
+    }
+    Err("Cannot allocate a unique install staging file".into())
 }
 
 async fn fetch_chunks(

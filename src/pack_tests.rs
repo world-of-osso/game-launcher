@@ -76,6 +76,8 @@ fn cold_install_fetches_and_verifies_a_pack() {
             .unwrap()
             .as_nanos()
     ));
+    std::fs::create_dir_all(dir.join("dir")).unwrap();
+    std::fs::write(dir.join("dir/a.part"), b"user data").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
         .block_on(sync_packs(
@@ -90,6 +92,7 @@ fn cold_install_fetches_and_verifies_a_pack() {
         .unwrap();
     server.join().unwrap();
     assert_eq!(std::fs::read(dir.join("dir/a")).unwrap(), b"hello");
+    assert_eq!(std::fs::read(dir.join("dir/a.part")).unwrap(), b"user data");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -160,6 +163,42 @@ fn delta_fetches_ranges_and_reuses_verified_chunk_on_resume() {
         .unwrap();
     assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"hello");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlinked_destination_directory_before_writing() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!(
+        "pack-link-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let install = root.join("install");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&install).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    symlink(&outside, install.join("link")).unwrap();
+    let manifest = manifest(serde_json::json!([file("link/empty")]));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(
+        runtime
+            .block_on(sync_packs(
+                &crate::http_client().unwrap(),
+                "http://127.0.0.1:9",
+                &install,
+                &manifest,
+                &["link/empty".into()],
+                false,
+                |_, _| Ok(())
+            ))
+            .is_err()
+    );
+    assert!(!outside.join("empty").exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
