@@ -12,6 +12,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - [ ] Resume after interruption without fetching already completed, unchanged files again.
 - [ ] Refuse an update when available disk space cannot hold its required downloads.
 - [ ] Prefer the separately versioned v2 pack manifest when present; use legacy files when it returns 404. Verify pack/chunk and reconstructed-file hashes, rehash retained staging before reuse, and reject unsafe paths and malformed range responses.
+- [ ] Refuse updates while a process executable is under the install root. Windows sharing violations and access-denied rename failures report that the game may be running; retained verified packs remain available for retry.
 
 ### Scheduling and Windows
 
@@ -57,7 +58,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 
 ## Known gaps (current cycle)
 
-- [ ] Pack rollout is not approved. Native Windows replacement and path alias behavior, running-game exclusion, and release-scale performance remain unverified. Local fixture evidence is in the engine pack-file spec.
+- [ ] Pack rollout is not approved. Native Windows replacement and path alias behavior, process exclusion on Windows, and release-scale performance remain unverified. Process enumeration is a snapshot and does not prevent a game from starting afterward. Local fixture evidence is in the engine pack-file spec.
 
 - [x] Native Windows bounded-transfer throughput (2026-10-14): 64-request overlap regression RED→GREEN; library22/22 PASS. Identical frozen R2 sample (2,000 random seed20261014 plus50 largest;2,050 files/3,488,299,952bytes) independently SHA256-verified before and after. Four transfers:204.922s/17.023MB/s;32 transfers:117.594s/29.664MB/s (1.74×). Evidence: engine `data/diagnostics/windows-final-flow-2026-10-14/{throughput-red.log,throughput-green.log,r2-sample-after-metrics.json,r2-sample-after-receipts.json}`. This sample does not prove full public transfer completion.
 
