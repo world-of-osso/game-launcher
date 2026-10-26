@@ -94,6 +94,75 @@ fn cold_install_fetches_and_verifies_a_pack() {
 }
 
 #[test]
+fn delta_fetches_ranges_and_reuses_verified_chunk_on_resume() {
+    let mut bytes = b"OSSPACK\x01".to_vec();
+    bytes.extend_from_slice(&5u32.to_le_bytes());
+    bytes.extend_from_slice(b"hello");
+    let pack_hash = hex::encode(Sha256::digest(&bytes));
+    let mut entry = file("a");
+    entry["size"] = 5.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"hello")).into();
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":5,"pack":pack_hash,"offset":12,"pack_size":bytes.len()}]);
+    let manifest = manifest(serde_json::json!([entry]));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let count = socket.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+            let range = request
+                .lines()
+                .find_map(|line| line.strip_prefix("range: bytes="))
+                .unwrap();
+            let (start, end) = range.split_once('-').unwrap();
+            let start: usize = start.trim().parse().unwrap();
+            let end: usize = end.trim().parse().unwrap();
+            write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n", end - start + 1, start, end, bytes.len()).unwrap();
+            socket.write_all(&bytes[start..=end]).unwrap();
+        }
+    });
+    let dir = std::env::temp_dir().join(format!(
+        "pack-delta-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = crate::http_client().unwrap();
+    runtime
+        .block_on(sync_packs(
+            &client,
+            &format!("http://{address}"),
+            &dir,
+            &manifest,
+            &["a".into()],
+            false,
+            |_, _| Ok(()),
+        ))
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"hello");
+    std::fs::remove_file(dir.join("a")).unwrap();
+    runtime
+        .block_on(sync_packs(
+            &client,
+            &format!("http://{address}"),
+            &dir,
+            &manifest,
+            &["a".into()],
+            false,
+            |_, _| Ok(()),
+        ))
+        .unwrap();
+    assert_eq!(std::fs::read(dir.join("a")).unwrap(), b"hello");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn rejects_unsupported_format_and_out_of_bounds_chunk() {
     let mut value = manifest(serde_json::json!([file("a")]));
     value.format_version = 2;

@@ -135,7 +135,7 @@ pub async fn sync_packs(
     game_dir: &std::path::Path,
     manifest: &PackManifest,
     needed: &[String],
-    _cold: bool,
+    cold: bool,
     mut completed: impl FnMut(&crate::FileEntry, usize) -> Result<(), String>,
 ) -> Result<(), String> {
     use futures_util::stream::{self, StreamExt, TryStreamExt};
@@ -149,10 +149,13 @@ pub async fn sync_packs(
     if files.len() != requested.len() {
         return Err("Requested file is absent from pack manifest".into());
     }
-    let mut packs = HashMap::new();
+    let mut packs: HashMap<String, Vec<PackChunk>> = HashMap::new();
     for file in &files {
         for chunk in &file.chunks {
-            packs.insert(chunk.pack.clone(), chunk.pack_size);
+            packs
+                .entry(chunk.pack.clone())
+                .or_default()
+                .push(chunk.clone());
         }
     }
     let mut space: Vec<crate::FileEntry> = files
@@ -163,20 +166,42 @@ pub async fn sync_packs(
             size: file.size,
         })
         .collect();
-    space.extend(packs.iter().map(|(hash, size)| crate::FileEntry {
-        path: format!(".pack-staging/{hash}"),
-        sha256: hash.clone(),
-        size: *size,
-    }));
+    if cold {
+        space.extend(packs.iter().map(|(hash, chunks)| crate::FileEntry {
+            path: format!(".pack-staging/{hash}"),
+            sha256: hash.clone(),
+            size: chunks[0].pack_size,
+        }));
+    } else {
+        let mut seen = HashSet::new();
+        for chunks in packs.values() {
+            for chunk in chunks {
+                if seen.insert(&chunk.sha256) {
+                    space.push(crate::FileEntry {
+                        path: format!(".pack-staging/chunks/{}-{}", chunk.pack, chunk.sha256),
+                        sha256: chunk.sha256.clone(),
+                        size: chunk.size,
+                    });
+                }
+            }
+        }
+    }
     crate::disk::prepare_download_space(game_dir, &space).await?;
     let staging = game_dir.join(".pack-staging");
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| format!("Create staging directory: {e}"))?;
-    stream::iter(packs.into_iter().map(|(hash, size)| {
+    stream::iter(packs.into_iter().map(|(hash, chunks)| {
         let path = staging.join(&hash);
+        let chunk_dir = staging.join("chunks");
         let url = format!("{base_url}/packs/{hash}");
-        async move { fetch_pack(client, &url, &path, &hash, size).await }
+        async move {
+            if cold {
+                fetch_pack(client, &url, &path, &hash, chunks[0].pack_size).await
+            } else {
+                fetch_chunks(client, &url, &path, &chunk_dir, &hash, &chunks).await
+            }
+        }
     }))
     .buffer_unordered(crate::MAX_PARALLEL_DOWNLOADS)
     .try_collect::<Vec<_>>()
@@ -284,16 +309,28 @@ async fn install_file(
         .map_err(|e| format!("Create {}: {e}", partial.display()))?;
     let mut file_hash = sha2::Sha256::new();
     for chunk in &entry.chunks {
-        let mut pack = tokio::fs::File::open(staging.join(&chunk.pack))
-            .await
-            .map_err(|e| format!("Open pack: {e}"))?;
-        pack.seek(std::io::SeekFrom::Start(chunk.offset))
-            .await
-            .map_err(|e| format!("Seek pack: {e}"))?;
+        let chunk_path = staging
+            .join("chunks")
+            .join(format!("{}-{}", chunk.pack, chunk.sha256));
         let mut data = vec![0; chunk.size as usize];
-        pack.read_exact(&mut data)
-            .await
-            .map_err(|e| format!("Read chunk: {e}"))?;
+        match tokio::fs::File::open(&chunk_path).await {
+            Ok(mut cached) => cached
+                .read_exact(&mut data)
+                .await
+                .map_err(|e| format!("Read cached chunk: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut pack = tokio::fs::File::open(staging.join(&chunk.pack))
+                    .await
+                    .map_err(|e| format!("Open pack: {e}"))?;
+                pack.seek(std::io::SeekFrom::Start(chunk.offset))
+                    .await
+                    .map_err(|e| format!("Seek pack: {e}"))?;
+                pack.read_exact(&mut data)
+                    .await
+                    .map_err(|e| format!("Read chunk: {e}"))?
+            }
+            Err(error) => return Err(format!("Open cached chunk: {error}")),
+        };
         if hex::encode(sha2::Sha256::digest(&data)) != chunk.sha256 {
             return Err(format!("Corrupt chunk for {}", entry.path));
         }
@@ -315,4 +352,130 @@ async fn install_file(
         .await
         .map_err(|e| format!("Install {}: {e}", destination.display()))?;
     Ok(())
+}
+
+async fn fetch_chunks(
+    client: &reqwest::Client,
+    url: &str,
+    pack_path: &std::path::Path,
+    chunk_dir: &std::path::Path,
+    pack_hash: &str,
+    chunks: &[PackChunk],
+) -> Result<(), String> {
+    if valid_pack(pack_path, pack_hash, chunks[0].pack_size).await? {
+        return Ok(());
+    }
+    tokio::fs::create_dir_all(chunk_dir)
+        .await
+        .map_err(|e| format!("Create chunk staging: {e}"))?;
+    let mut unique = HashMap::new();
+    for chunk in chunks {
+        unique
+            .entry(chunk.sha256.clone())
+            .or_insert_with(|| chunk.clone());
+    }
+    let mut missing = Vec::new();
+    for chunk in unique.into_values() {
+        let path = chunk_dir.join(format!("{}-{}", chunk.pack, chunk.sha256));
+        let valid = match tokio::fs::metadata(&path).await {
+            Ok(meta) if meta.len() == chunk.size => {
+                crate::hash_file(&path).await.map_err(|e| e.to_string())? == chunk.sha256
+            }
+            Ok(_) => false,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(format!("Stat {}: {e}", path.display())),
+        };
+        if !valid {
+            missing.push(chunk);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let header = fetch_range(client, url, 0, 7, chunks[0].pack_size).await?;
+    if header != b"OSSPACK\x01" {
+        return Err(format!("Unsupported pack magic: {pack_hash}"));
+    }
+    missing.sort_by_key(|chunk| chunk.offset);
+    let mut groups: Vec<Vec<PackChunk>> = Vec::new();
+    for chunk in missing {
+        if let Some(group) = groups.last_mut() {
+            let last = group.last().unwrap();
+            if chunk.offset <= last.offset + last.size + 65_536 {
+                group.push(chunk);
+                continue;
+            }
+        }
+        groups.push(vec![chunk]);
+    }
+    for group in groups {
+        let start = group[0].offset;
+        let end = group
+            .iter()
+            .map(|chunk| chunk.offset + chunk.size)
+            .max()
+            .unwrap();
+        let data = if end == start {
+            Vec::new()
+        } else {
+            fetch_range(client, url, start, end - 1, group[0].pack_size).await?
+        };
+        for chunk in group {
+            let begin = (chunk.offset - start) as usize;
+            let body = &data[begin..begin + chunk.size as usize];
+            if hex::encode(sha2::Sha256::digest(body)) != chunk.sha256 {
+                return Err(format!("Corrupt chunk: {}", chunk.sha256));
+            }
+            let path = chunk_dir.join(format!("{}-{}", chunk.pack, chunk.sha256));
+            let temporary = path.with_extension("part");
+            tokio::fs::write(&temporary, body)
+                .await
+                .map_err(|e| format!("Write chunk: {e}"))?;
+            tokio::fs::rename(&temporary, &path)
+                .await
+                .map_err(|e| format!("Stage chunk: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_range(
+    client: &reqwest::Client,
+    url: &str,
+    start: u64,
+    end: u64,
+    total: u64,
+) -> Result<Vec<u8>, String> {
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+        .send()
+        .await
+        .map_err(|e| format!("Fetch range: {e}"))?;
+    let expected = format!("bytes {start}-{end}/{total}");
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        || response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|h| h.to_str().ok())
+            != Some(expected.as_str())
+    {
+        return Err(format!("Invalid range response for {url}"));
+    }
+    let mut data = Vec::new();
+    let length = (end - start + 1) as usize;
+    while let Some(bytes) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("Read range: {e}"))?
+    {
+        if data.len() + bytes.len() > length {
+            return Err("Range exceeds declared size".into());
+        }
+        data.extend_from_slice(&bytes);
+    }
+    if data.len() != length {
+        return Err("Truncated range".into());
+    }
+    Ok(data)
 }
