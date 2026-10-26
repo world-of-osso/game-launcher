@@ -258,6 +258,44 @@ fn rejects_range_when_server_ignores_it() {
 
 #[cfg(unix)]
 #[test]
+fn rejects_symlinked_staged_pack() {
+    use std::os::unix::fs::symlink;
+    let root = std::env::temp_dir().join(format!(
+        "pack-stage-link-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let install = root.join("install");
+    std::fs::create_dir_all(install.join(".pack-staging")).unwrap();
+    let outside = root.join("outside");
+    std::fs::write(&outside, b"user data").unwrap();
+    let mut entry = file("a");
+    entry["size"] = 1.into();
+    entry["sha256"] = hex::encode(Sha256::digest(b"x")).into();
+    let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    entry["chunks"] = serde_json::json!([{"sha256":entry["sha256"], "size":1,"pack":hash,"offset":12,"pack_size":13}]);
+    symlink(&outside, install.join(".pack-staging").join(hash)).unwrap();
+    let manifest = manifest(serde_json::json!([entry]));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(sync_packs(
+        &crate::http_client().unwrap(),
+        "http://127.0.0.1:9",
+        &install,
+        &manifest,
+        &["a".into()],
+        true,
+        |_, _| Ok(()),
+    ));
+    assert!(result.unwrap_err().contains("Symlink"));
+    assert_eq!(std::fs::read(outside).unwrap(), b"user data");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn rejects_symlinked_destination_directory_before_writing() {
     use std::os::unix::fs::symlink;
     let root = std::env::temp_dir().join(format!(

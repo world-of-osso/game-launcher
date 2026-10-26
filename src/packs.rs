@@ -162,6 +162,18 @@ pub async fn sync_packs(
                 .push(chunk.clone());
         }
     }
+    for (hash, chunks) in &packs {
+        reject_symlinks(game_dir, &format!(".pack-staging/{hash}"))?;
+        if !cold {
+            reject_symlinks(game_dir, ".pack-staging/chunks")?;
+            for chunk in chunks {
+                reject_symlinks(
+                    game_dir,
+                    &format!(".pack-staging/chunks/{}-{}", hash, chunk.sha256),
+                )?;
+            }
+        }
+    }
     let mut space: Vec<crate::FileEntry> = files
         .iter()
         .map(|file| crate::FileEntry {
@@ -170,19 +182,26 @@ pub async fn sync_packs(
             size: file.size,
         })
         .collect();
-    if cold {
-        space.extend(packs.iter().map(|(hash, chunks)| crate::FileEntry {
-            path: format!(".pack-staging/{hash}"),
-            sha256: hash.clone(),
-            size: chunks[0].pack_size,
-        }));
-    } else {
-        let mut seen = HashSet::new();
-        for chunks in packs.values() {
+    let staging = game_dir.join(".pack-staging");
+    let mut seen = HashSet::new();
+    for (hash, chunks) in &packs {
+        if valid_pack(&staging.join(hash), hash, chunks[0].pack_size).await? {
+            continue;
+        }
+        if cold {
+            space.push(crate::FileEntry {
+                path: format!(".pack-staging/{hash}"),
+                sha256: hash.clone(),
+                size: chunks[0].pack_size,
+            });
+        } else {
             for chunk in chunks {
-                if seen.insert(&chunk.sha256) {
+                let name = format!("{}-{}", hash, chunk.sha256);
+                if seen.insert(name.clone())
+                    && !valid_chunk(&staging.join("chunks").join(&name), chunk).await?
+                {
                     space.push(crate::FileEntry {
-                        path: format!(".pack-staging/chunks/{}-{}", chunk.pack, chunk.sha256),
+                        path: format!(".pack-staging/chunks/{name}"),
                         sha256: chunk.sha256.clone(),
                         size: chunk.size,
                     });
@@ -190,8 +209,7 @@ pub async fn sync_packs(
             }
         }
     }
-    crate::disk::prepare_download_space(game_dir, &space).await?;
-    let staging = game_dir.join(".pack-staging");
+    crate::disk::prepare_pack_space(game_dir, &space).await?;
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| format!("Create staging directory: {e}"))?;
@@ -281,10 +299,7 @@ async fn fetch_pack_once(
     if !response.status().is_success() {
         return Err(crate::retry::TransferFailure::status(hash, &response));
     }
-    let temporary = path.with_extension("part");
-    let mut output = tokio::fs::File::create(&temporary)
-        .await
-        .map_err(|e| format!("Create {}: {e}", temporary.display()))?;
+    let (temporary, mut output) = create_install_partial(path).await?;
     let mut count = 0u64;
     while let Some(chunk) = response
         .chunk()
@@ -445,6 +460,18 @@ async fn create_install_partial(
     Err("Cannot allocate a unique install staging file".into())
 }
 
+async fn valid_chunk(path: &std::path::Path, chunk: &PackChunk) -> Result<bool, String> {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if meta.len() == chunk.size => Ok(crate::hash_file(path)
+            .await
+            .map_err(|error| error.to_string())?
+            == chunk.sha256),
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Stat {}: {error}", path.display())),
+    }
+}
+
 async fn fetch_chunks(
     client: &reqwest::Client,
     url: &str,
@@ -468,15 +495,7 @@ async fn fetch_chunks(
     let mut missing = Vec::new();
     for chunk in unique.into_values() {
         let path = chunk_dir.join(format!("{}-{}", chunk.pack, chunk.sha256));
-        let valid = match tokio::fs::metadata(&path).await {
-            Ok(meta) if meta.len() == chunk.size => {
-                crate::hash_file(&path).await.map_err(|e| e.to_string())? == chunk.sha256
-            }
-            Ok(_) => false,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => return Err(format!("Stat {}: {e}", path.display())),
-        };
-        if !valid {
+        if !valid_chunk(&path, &chunk).await? {
             missing.push(chunk);
         }
     }
@@ -522,10 +541,17 @@ async fn fetch_chunks(
                 return Err(format!("Corrupt chunk: {}", chunk.sha256));
             }
             let path = chunk_dir.join(format!("{}-{}", chunk.pack, chunk.sha256));
-            let temporary = path.with_extension("part");
-            tokio::fs::write(&temporary, body)
+            let (temporary, mut output) = create_install_partial(&path).await?;
+            use tokio::io::AsyncWriteExt;
+            output
+                .write_all(body)
                 .await
                 .map_err(|e| format!("Write chunk: {e}"))?;
+            output
+                .flush()
+                .await
+                .map_err(|e| format!("Flush chunk: {e}"))?;
+            drop(output);
             tokio::fs::rename(&temporary, &path)
                 .await
                 .map_err(|e| format!("Stage chunk: {e}"))?;

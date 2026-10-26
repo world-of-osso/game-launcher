@@ -36,6 +36,30 @@ pub(crate) async fn prepare_download_space(
     Ok(())
 }
 
+pub(crate) async fn prepare_pack_space(
+    game_dir: &Path,
+    entries: &[FileEntry],
+) -> Result<(), String> {
+    tokio::fs::create_dir_all(game_dir)
+        .await
+        .map_err(|error| format!("Create {}: {error}", game_dir.display()))?;
+    let stats = fs2::statvfs(game_dir)
+        .map_err(|error| format!("Check disk space at {}: {error}", game_dir.display()))?;
+    let cluster = stats.allocation_granularity();
+    if cluster == 0 {
+        return Err("Cannot check disk space: filesystem allocation granularity is zero".into());
+    }
+    let required = total_allocations(entries, cluster)?;
+    if stats.available_space() < required {
+        return Err(format!(
+            "Insufficient disk space at {}: need {required} bytes, available {}",
+            game_dir.display(),
+            stats.available_space()
+        ));
+    }
+    Ok(())
+}
+
 fn total_allocations(entries: &[FileEntry], cluster: u64) -> Result<u64, String> {
     entries.iter().try_fold(0_u64, |total, entry| {
         total
