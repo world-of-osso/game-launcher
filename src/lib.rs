@@ -7,6 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub mod cache;
 mod disk;
+#[cfg(test)]
+mod pack_tests;
+pub mod packs;
 mod retry;
 pub mod self_update;
 #[cfg(windows)]
