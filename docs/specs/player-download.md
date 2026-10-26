@@ -11,6 +11,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - [ ] Reuse cached hashes only when actual size and nanosecond modification time match; actual size must also match the manifest. Hash changed files and compare the result to the manifest.
 - [ ] Resume after interruption without fetching already completed, unchanged files again.
 - [ ] Refuse an update when available disk space cannot hold its required downloads.
+- [ ] Prefer the separately versioned v2 pack manifest when present; use legacy files when it returns 404. Verify pack/chunk and reconstructed-file hashes, rehash retained staging before reuse, and reject unsafe paths and malformed range responses.
 
 ### Scheduling and Windows
 
@@ -37,6 +38,7 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 ## Implementation inventory
 
 - `src/lib.rs`: player transfer, hashing and regression tests.
+- `src/packs.rs`: v2 validation, whole-pack and range transfer, resume and reconstruction.
 - `src/cache.rs`: verified receipts and subsecond mutation detection.
 - `src/disk.rs`: allocation-granularity-aware available-space preflight.
 - `src/main.rs`: startup/periodic manifest and shared UI/CLI synchronization integration.
@@ -54,6 +56,8 @@ Desktop UI and CLI update the player from a SHA256 manifest. Transfer source: `s
 - `src/runtime_tests.rs`: missing spawn error, production read timeout, Windows long install path transfer/hash/extensionless PE spawn.
 
 ## Known gaps (current cycle)
+
+- [ ] Pack rollout is not approved. Native Windows replacement and path alias behavior, running-game exclusion, and release-scale performance remain unverified. Local fixture evidence is in the engine pack-file spec.
 
 - [x] Native Windows bounded-transfer throughput (2026-10-14): 64-request overlap regression RED→GREEN; library22/22 PASS. Identical frozen R2 sample (2,000 random seed20261014 plus50 largest;2,050 files/3,488,299,952bytes) independently SHA256-verified before and after. Four transfers:204.922s/17.023MB/s;32 transfers:117.594s/29.664MB/s (1.74×). Evidence: engine `data/diagnostics/windows-final-flow-2026-10-14/{throughput-red.log,throughput-green.log,r2-sample-after-metrics.json,r2-sample-after-receipts.json}`. This sample does not prove full public transfer completion.
 
