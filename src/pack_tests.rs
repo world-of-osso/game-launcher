@@ -81,6 +81,14 @@ fn cold_install_retries_transient_failure_and_verifies_a_pack() {
     ));
     std::fs::create_dir_all(dir.join("dir")).unwrap();
     std::fs::write(dir.join("dir/a.part"), b"user data").unwrap();
+    let chunk = &manifest.files[0].chunks[0];
+    let chunks = dir.join(".pack-staging/chunks");
+    std::fs::create_dir_all(&chunks).unwrap();
+    std::fs::write(
+        chunks.join(format!("{}-{}", chunk.pack, chunk.sha256)),
+        b"wrong",
+    )
+    .unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
         .block_on(sync_packs(

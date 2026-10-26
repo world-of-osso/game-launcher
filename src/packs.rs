@@ -195,23 +195,29 @@ pub async fn sync_packs(
     tokio::fs::create_dir_all(&staging)
         .await
         .map_err(|e| format!("Create staging directory: {e}"))?;
-    stream::iter(packs.into_iter().map(|(hash, chunks)| {
+    let fetched = stream::iter(packs.into_iter().map(|(hash, chunks)| {
         let path = staging.join(&hash);
         let chunk_dir = staging.join("chunks");
         let url = format!("{base_url}/packs/{hash}");
         async move {
-            if cold {
-                fetch_pack(client, &url, &path, &hash, chunks[0].pack_size).await
+            let complete = if cold {
+                fetch_pack(client, &url, &path, &hash, chunks[0].pack_size).await?;
+                true
             } else {
-                fetch_chunks(client, &url, &path, &chunk_dir, &hash, &chunks).await
-            }
+                fetch_chunks(client, &url, &path, &chunk_dir, &hash, &chunks).await?
+            };
+            Ok::<_, String>((hash, complete))
         }
     }))
     .buffer_unordered(crate::MAX_PARALLEL_DOWNLOADS)
     .try_collect::<Vec<_>>()
     .await?;
+    let whole_packs: HashSet<String> = fetched
+        .into_iter()
+        .filter_map(|(hash, complete)| complete.then_some(hash))
+        .collect();
     for (index, file) in files.iter().enumerate() {
-        install_file(game_dir, &staging, file).await?;
+        install_file(game_dir, &staging, file, &whole_packs).await?;
         completed(
             &crate::FileEntry {
                 path: file.path.clone(),
@@ -331,6 +337,7 @@ async fn install_file(
     game_dir: &std::path::Path,
     staging: &std::path::Path,
     entry: &PackFile,
+    whole_packs: &HashSet<String>,
 ) -> Result<(), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
     let destination = game_dir.join(&entry.path);
@@ -346,7 +353,12 @@ async fn install_file(
             .join("chunks")
             .join(format!("{}-{}", chunk.pack, chunk.sha256));
         let mut data = vec![0; chunk.size as usize];
-        match tokio::fs::File::open(&chunk_path).await {
+        let cached_file = if whole_packs.contains(&chunk.pack) {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        } else {
+            tokio::fs::File::open(&chunk_path).await
+        };
+        match cached_file {
             Ok(mut cached) => cached
                 .read_exact(&mut data)
                 .await
@@ -440,9 +452,9 @@ async fn fetch_chunks(
     chunk_dir: &std::path::Path,
     pack_hash: &str,
     chunks: &[PackChunk],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     if valid_pack(pack_path, pack_hash, chunks[0].pack_size).await? {
-        return Ok(());
+        return Ok(true);
     }
     tokio::fs::create_dir_all(chunk_dir)
         .await
@@ -469,7 +481,7 @@ async fn fetch_chunks(
         }
     }
     if missing.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let header = fetch_range(client, url, 0, 7, chunks[0].pack_size).await?;
     if header != b"OSSPACK\x01" {
@@ -519,7 +531,7 @@ async fn fetch_chunks(
                 .map_err(|e| format!("Stage chunk: {e}"))?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn fetch_range(
