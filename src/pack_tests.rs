@@ -225,7 +225,8 @@ fn refuses_install_while_game_executable_is_running() {
             .as_nanos()
     ));
     std::fs::create_dir_all(dir.join("runtime")).unwrap();
-    let executable = dir.join("runtime/godot");
+    // Keep the name: a multi-call coreutils (uutils) dispatches on argv[0]'s basename.
+    let executable = dir.join("runtime/sleep");
     std::fs::copy("/usr/bin/sleep", &executable).unwrap();
     let mut process = std::process::Command::new(&executable)
         .arg("10")
@@ -248,7 +249,7 @@ fn refuses_install_while_game_executable_is_running() {
     let seen: Vec<_> = system
         .processes()
         .values()
-        .filter(|p| p.name().to_string_lossy().contains("godot"))
+        .filter(|p| p.name().to_string_lossy().contains("sleep"))
         .map(|p| (p.pid(), p.exe().map(|e| e.to_path_buf())))
         .collect();
     let _ = process.kill();
@@ -257,7 +258,7 @@ fn refuses_install_while_game_executable_is_running() {
         result
             .as_ref()
             .is_err_and(|e| e.contains("game is running")),
-        "result {result:?}; root {:?}; godot processes {seen:?}",
+        "result {result:?}; root {:?}; sleep processes {seen:?}",
         std::fs::canonicalize(&dir)
     );
     assert!(!dir.join("a").exists());
