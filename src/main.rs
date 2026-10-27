@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "desktop")]
@@ -508,8 +509,24 @@ async fn files_needing_update(
             needed.push(entry.clone());
         }
     }
+    let listed = listed_paths(files);
+    let reused =
+        game_launcher::reuse::reuse_local_content(game_dir, &mut cache, needed, &listed).await;
+    // Receipts of moved or copied files must persist even when a later placement fails.
     cache.save(game_dir)?;
-    Ok(needed)
+    reused
+}
+
+fn listed_paths(files: &[FileEntry]) -> HashSet<&str> {
+    files.iter().map(|entry| entry.path.as_str()).collect()
+}
+
+/// After a complete sync, files from earlier builds that the manifest no longer lists go.
+fn prune_unlisted(game_dir: &Path, files: &[FileEntry]) -> Result<usize, String> {
+    let mut cache = game_launcher::cache::FileHashCache::load(game_dir)?;
+    let removed = game_launcher::reuse::prune_unlisted(game_dir, &mut cache, &listed_paths(files));
+    cache.save(game_dir)?;
+    removed
 }
 
 async fn sync_downloads(
@@ -565,14 +582,13 @@ async fn check_and_sync(
 
     let files = filter_platform_files(&manifest.files);
     let needed = files_needing_update(game_dir, &files).await?;
-    if needed.is_empty() {
-        return Ok(());
+    if !needed.is_empty() {
+        let cold = files
+            .iter()
+            .all(|entry| !game_dir.join(&entry.path).exists());
+        sync_files(&client, game_dir, &needed, &manifest, cold, state, progress).await?;
     }
-
-    let cold = files
-        .iter()
-        .all(|entry| !game_dir.join(&entry.path).exists());
-    sync_files(&client, game_dir, &needed, &manifest, cold, state, progress).await
+    prune_unlisted(game_dir, &files).map(|_| ())
 }
 
 #[cfg(feature = "desktop")]
@@ -657,15 +673,20 @@ fn run_update() {
             });
         if needed.is_empty() {
             println!("All {} files up to date", files.len());
-            return;
+        } else {
+            println!("Downloading {}/{} files...", needed.len(), files.len());
+            let cold = files
+                .iter()
+                .all(|entry| !game_dir.join(&entry.path).exists());
+            cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
         }
-
-        println!("Downloading {}/{} files...", needed.len(), files.len());
-        let cold = files
-            .iter()
-            .all(|entry| !game_dir.join(&entry.path).exists());
-        cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
-        println!("Done");
+        match prune_unlisted(&game_dir, &files) {
+            Ok(removed) => println!("Done; removed {removed} files no longer listed"),
+            Err(error) => {
+                eprintln!("ERROR: {error}");
+                std::process::exit(1);
+            }
+        }
     });
 }
 

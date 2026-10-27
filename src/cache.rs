@@ -65,6 +65,37 @@ impl FileHashCache {
         Ok(())
     }
 
+    /// Installed paths per (sha256, size), from receipts only.
+    pub fn paths_by_content(&self) -> HashMap<(String, u64), Vec<String>> {
+        let mut index: HashMap<(String, u64), Vec<String>> = HashMap::new();
+        for (path, receipt) in &self.files {
+            index
+                .entry((receipt.sha256.clone(), receipt.size))
+                .or_default()
+                .push(path.clone());
+        }
+        index
+    }
+
+    /// True when `path` still has the size and mtime its receipt was recorded with.
+    pub fn is_current(&self, game_dir: &Path, path: &str) -> bool {
+        let Some(receipt) = self.files.get(path) else {
+            return false;
+        };
+        std::fs::metadata(game_dir.join(path))
+            .ok()
+            .and_then(|meta| Some((meta.len(), mtime_nanos(&meta).ok()?)))
+            == Some((receipt.size, receipt.mtime_nanos))
+    }
+
+    pub fn paths(&self) -> Vec<String> {
+        self.files.keys().cloned().collect()
+    }
+
+    pub fn forget(&mut self, path: &str) {
+        self.files.remove(path);
+    }
+
     pub fn record_verified(&mut self, game_dir: &Path, entry: &FileEntry) -> Result<(), String> {
         let path = game_dir.join(&entry.path);
         let meta = std::fs::metadata(&path)

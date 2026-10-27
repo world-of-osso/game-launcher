@@ -11,6 +11,7 @@ mod disk;
 mod pack_tests;
 pub mod packs;
 mod retry;
+pub mod reuse;
 pub mod self_update;
 #[cfg(windows)]
 pub mod windows_shortcut;
