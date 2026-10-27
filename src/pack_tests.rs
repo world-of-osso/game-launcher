@@ -243,11 +243,23 @@ fn refuses_install_while_game_executable_is_running() {
         true,
         |_, _| Ok(()),
     ));
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "stop", "agents-packrunningtest.slice"])
-        .status();
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let seen: Vec<_> = system
+        .processes()
+        .values()
+        .filter(|p| p.name().to_string_lossy().contains("godot"))
+        .map(|p| (p.pid(), p.exe().map(|e| e.to_path_buf())))
+        .collect();
+    let _ = process.kill();
     let _ = process.wait();
-    assert!(result.unwrap_err().contains("game is running"));
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|e| e.contains("game is running")),
+        "result {result:?}; root {:?}; godot processes {seen:?}",
+        std::fs::canonicalize(&dir)
+    );
     assert!(!dir.join("a").exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
