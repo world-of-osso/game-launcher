@@ -427,9 +427,22 @@ pub fn reject_running_game(game_dir: &std::path::Path) -> Result<(), String> {
     let root = std::fs::canonicalize(game_dir)
         .map_err(|error| format!("Resolve {}: {error}", game_dir.display()))?;
     let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_exe(sysinfo::UpdateKind::Always)
+            .with_cmd(sysinfo::UpdateKind::Always),
+    );
     for process in system.processes().values() {
-        if let Some(executable) = process.exe() {
+        // The executable link can be unreadable (seen on CI runners); an absolute
+        // argv[0] still names the binary the process was started from.
+        let launched = process
+            .cmd()
+            .first()
+            .map(std::path::Path::new)
+            .filter(|path| path.is_absolute());
+        if let Some(executable) = process.exe().or(launched) {
             #[cfg(windows)]
             let matches = std::path::PathBuf::from(executable.to_string_lossy().to_lowercase())
                 .starts_with(std::path::PathBuf::from(
