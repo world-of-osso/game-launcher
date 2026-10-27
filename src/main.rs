@@ -456,21 +456,79 @@ async fn fetch_manifest(
     parse_manifest_response(resp).await.map(Some)
 }
 
-/// Resolve manifest, using cache on 304.
-async fn resolve_manifest(client: &reqwest::Client) -> Result<Manifest, String> {
-    let response = client
-        .get(file_url("manifest-v2.json"))
+/// Local copy of manifest-v2.json and its ETag, so an unchanged manifest costs one 304.
+const MANIFEST_V2: &str = ".manifest-v2.json";
+const MANIFEST_V2_ETAG: &str = ".manifest-v2.etag";
+/// ETag of the manifest whose files were last installed and pruned completely.
+const INSTALLED_MANIFEST: &str = ".installed-manifest";
+
+/// Fetches manifest-v2 conditionally: its ~600 MB body is downloaded only when the ETag
+/// changed. `None` when the server publishes no v2 manifest.
+async fn fetch_v2_manifest(
+    client: &reqwest::Client,
+    game_dir: &Path,
+) -> Result<Option<(game_launcher::packs::PackManifest, Option<String>)>, String> {
+    let body_path = game_dir.join(MANIFEST_V2);
+    let etag_path = game_dir.join(MANIFEST_V2_ETAG);
+    let cached_etag = std::fs::read_to_string(&etag_path)
+        .ok()
+        .filter(|_| body_path.is_file());
+    let mut request = client.get(file_url("manifest-v2.json"));
+    if let Some(etag) = &cached_etag {
+        request = request.header("If-None-Match", etag);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("Fetch v2 manifest: {error}"))?;
-    if response.status() != reqwest::StatusCode::NOT_FOUND {
-        if !response.status().is_success() {
-            return Err(format!("Fetch v2 manifest: {}", response.status()));
+    let parse = |body: &[u8]| {
+        serde_json::from_slice::<game_launcher::packs::PackManifest>(body)
+            .map_err(|error| format!("Parse v2 manifest: {error}"))
+    };
+    match response.status() {
+        reqwest::StatusCode::NOT_FOUND => return Ok(None),
+        reqwest::StatusCode::NOT_MODIFIED => {
+            let body = std::fs::read(&body_path)
+                .map_err(|error| format!("Read {}: {error}", body_path.display()))?;
+            return Ok(Some((parse(&body)?, cached_etag)));
         }
-        let packs: game_launcher::packs::PackManifest = response
-            .json()
-            .await
-            .map_err(|error| format!("Parse v2 manifest: {error}"))?;
+        status if !status.is_success() => return Err(format!("Fetch v2 manifest: {status}")),
+        _ => {}
+    }
+    let etag = extract_response_header(&response, "etag");
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Fetch v2 manifest: {error}"))?;
+    let packs = parse(&body)?;
+    std::fs::create_dir_all(game_dir)
+        .map_err(|error| format!("Create {}: {error}", game_dir.display()))?;
+    // The ETag goes first and last, so a body and an ETag on disk never disagree.
+    remove_if_present(&etag_path)?;
+    std::fs::write(&body_path, &body)
+        .map_err(|error| format!("Save {}: {error}", body_path.display()))?;
+    if let Some(etag) = &etag {
+        std::fs::write(&etag_path, etag)
+            .map_err(|error| format!("Save {}: {error}", etag_path.display()))?;
+    }
+    Ok(Some((packs, etag)))
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("Remove {}: {error}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Resolve the manifest and the ETag identifying it (v2 only).
+async fn resolve_manifest(
+    client: &reqwest::Client,
+    game_dir: &Path,
+) -> Result<(Manifest, Option<String>), String> {
+    if let Some((packs, etag)) = fetch_v2_manifest(client, game_dir).await? {
         packs.validate()?;
         let files = packs
             .files
@@ -481,19 +539,54 @@ async fn resolve_manifest(client: &reqwest::Client) -> Result<Manifest, String> 
                 sha256: file.sha256.clone(),
             })
             .collect();
-        return Ok(Manifest {
+        let manifest = Manifest {
             version: "2".into(),
             files,
             packs: Some(packs),
-        });
+        };
+        return Ok((manifest, etag));
     }
     let cached = load_manifest_cache();
-    match fetch_manifest(client, cached.as_ref()).await? {
-        Some(m) => Ok(m),
+    let manifest = match fetch_manifest(client, cached.as_ref()).await? {
+        Some(m) => m,
         None => cached
             .map(|c| c.manifest)
-            .ok_or_else(|| "No manifest available".to_string()),
+            .ok_or_else(|| "No manifest available".to_string())?,
+    };
+    Ok((manifest, None))
+}
+
+/// Brings `game_dir` to the published manifest. A manifest with the same ETag as the last
+/// complete install returns at once, without loading receipts or touching installed files.
+/// `progress(entry, done, total)` reports each placed file, starting with `done == 0`.
+async fn sync_game(
+    client: &reqwest::Client,
+    game_dir: &Path,
+    mut progress: impl FnMut(&FileEntry, usize, usize),
+) -> Result<(), String> {
+    let (manifest, etag) = resolve_manifest(client, game_dir).await?;
+    let installed = game_dir.join(INSTALLED_MANIFEST);
+    if etag.is_some() && std::fs::read_to_string(&installed).ok() == etag {
+        return Ok(());
     }
+    let files = filter_platform_files(&manifest.files);
+    let needed = files_needing_update(game_dir, &files).await?;
+    if let Some(first) = needed.first() {
+        progress(first, 0, needed.len());
+        let cold = files
+            .iter()
+            .all(|entry| !game_dir.join(&entry.path).exists());
+        sync_downloads(client, game_dir, &needed, &manifest, cold, |entry, done| {
+            progress(entry, done, needed.len())
+        })
+        .await?;
+    }
+    prune_unlisted(game_dir, &files)?;
+    if let Some(etag) = etag {
+        std::fs::write(&installed, etag)
+            .map_err(|error| format!("Save {}: {error}", installed.display()))?;
+    }
+    Ok(())
 }
 
 // --- File sync ---
@@ -574,45 +667,16 @@ async fn sync_downloads(
 #[cfg(feature = "desktop")]
 async fn check_and_sync(
     game_dir: &Path,
-    state: Signal<LauncherState>,
-    progress: Signal<f64>,
-) -> Result<(), String> {
-    let client = build_client();
-    let manifest = resolve_manifest(&client).await?;
-
-    let files = filter_platform_files(&manifest.files);
-    let needed = files_needing_update(game_dir, &files).await?;
-    if !needed.is_empty() {
-        let cold = files
-            .iter()
-            .all(|entry| !game_dir.join(&entry.path).exists());
-        sync_files(&client, game_dir, &needed, &manifest, cold, state, progress).await?;
-    }
-    prune_unlisted(game_dir, &files).map(|_| ())
-}
-
-#[cfg(feature = "desktop")]
-async fn sync_files(
-    client: &reqwest::Client,
-    game_dir: &Path,
-    needed: &[FileEntry],
-    manifest: &Manifest,
-    cold: bool,
     mut state: Signal<LauncherState>,
     mut progress: Signal<f64>,
 ) -> Result<(), String> {
-    state.set(LauncherState::Downloading {
-        current: needed[0].path.clone(),
-        done: 0,
-        total: needed.len(),
-    });
-    sync_downloads(client, game_dir, needed, manifest, cold, |entry, done| {
+    sync_game(&build_client(), game_dir, |entry, done, total| {
         state.set(LauncherState::Downloading {
             current: entry.path.clone(),
             done,
-            total: needed.len(),
+            total,
         });
-        progress.set(done as f64 / needed.len() as f64 * 100.0);
+        progress.set(done as f64 / total as f64 * 100.0);
     })
     .await
 }
@@ -654,70 +718,16 @@ fn run_check_manifest() {
 fn run_update() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let client = build_client();
-        let game_dir = game_directory();
-        let manifest = match resolve_manifest(&client).await {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("ERROR: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let files = filter_platform_files(&manifest.files);
-        let needed = files_needing_update(&game_dir, &files)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            });
-        if needed.is_empty() {
-            println!("All {} files up to date", files.len());
-        } else {
-            println!("Downloading {}/{} files...", needed.len(), files.len());
-            let cold = files
-                .iter()
-                .all(|entry| !game_dir.join(&entry.path).exists());
-            cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
-        }
-        match prune_unlisted(&game_dir, &files) {
-            Ok(removed) => println!("Done; removed {removed} files no longer listed"),
-            Err(error) => {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            }
-        }
+        cli_sync_game(&game_directory()).await;
+        println!("Game is up to date");
     });
 }
 
 fn run_play() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let client = build_client();
         let game_dir = game_directory();
-        let manifest = match resolve_manifest(&client).await {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("ERROR: {e}");
-                std::process::exit(1);
-            }
-        };
-
-        let files = filter_platform_files(&manifest.files);
-        let needed = files_needing_update(&game_dir, &files)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            });
-        if !needed.is_empty() {
-            println!("Updating {}/{} files...", needed.len(), files.len());
-            let cold = files
-                .iter()
-                .all(|entry| !game_dir.join(&entry.path).exists());
-            cli_download_files(&client, &game_dir, &needed, &manifest, cold).await;
-        }
-
+        cli_sync_game(&game_dir).await;
         println!("Launching...");
         let arguments = std::env::args_os().skip(2).collect::<Vec<_>>();
         if let Err(error) = launch_game(&game_dir, &arguments) {
@@ -727,15 +737,9 @@ fn run_play() {
     });
 }
 
-async fn cli_download_files(
-    client: &reqwest::Client,
-    game_dir: &Path,
-    needed: &[FileEntry],
-    manifest: &Manifest,
-    cold: bool,
-) {
-    if let Err(error) = sync_downloads(client, game_dir, needed, manifest, cold, |entry, done| {
-        println!("  [{}/{}] {}", done, needed.len(), entry.path);
+async fn cli_sync_game(game_dir: &Path) {
+    if let Err(error) = sync_game(&build_client(), game_dir, |entry, done, total| {
+        println!("  [{done}/{total}] {}", entry.path);
     })
     .await
     {

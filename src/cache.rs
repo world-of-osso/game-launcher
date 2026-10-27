@@ -108,6 +108,11 @@ impl FileHashCache {
         game_dir: &Path,
         entry: &FileEntry,
     ) -> Result<bool, String> {
+        // A receipt is trusted without a stat: statting all 1.7M installed files took minutes
+        // on Windows. Only files without a receipt are read from disk.
+        if let Some(cached) = self.files.get(&entry.path) {
+            return Ok(cached.sha256 != entry.sha256 || cached.size != entry.size);
+        }
         let path = game_dir.join(&entry.path);
         let meta = match tokio::fs::metadata(&path).await {
             Ok(meta) => meta,
@@ -116,13 +121,6 @@ impl FileHashCache {
         };
         if meta.len() != entry.size {
             return Ok(true);
-        }
-        let modified = mtime_nanos(&meta)?;
-        if let Some(cached) = self.files.get(&entry.path)
-            && cached.size == meta.len()
-            && cached.mtime_nanos == modified
-        {
-            return Ok(cached.sha256 != entry.sha256);
         }
         let digest = hash_file(&path)
             .await
@@ -140,7 +138,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
-    fn same_second_rewrite_and_manifest_size_changes_invalidate_receipts() {
+    fn receipts_answer_without_disk_reads_and_manifest_changes_invalidate_them() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let dir = std::env::temp_dir().join(format!("launcher-cache-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
@@ -167,16 +165,18 @@ mod tests {
                 cache.needs_update(&dir, &wrong_size).await.unwrap(),
                 "manifest size must be checked even with a cached digest"
             );
-            std::fs::write(&path, b"tampered").unwrap();
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(UNIX_EPOCH + Duration::from_millis(100_200))
-                .unwrap();
+            let new_content = FileEntry {
+                sha256: hex::encode(Sha256::digest(b"replaced")),
+                ..entry.clone()
+            };
             assert!(
-                cache.needs_update(&dir, &entry).await.unwrap(),
-                "same-second rewrite must be rehashed"
+                cache.needs_update(&dir, &new_content).await.unwrap(),
+                "a changed manifest digest must be downloaded"
+            );
+            std::fs::remove_file(&path).unwrap();
+            assert!(
+                !cache.needs_update(&dir, &entry).await.unwrap(),
+                "an unchanged receipt is answered without reading the disk"
             );
             std::fs::remove_dir_all(dir).unwrap();
         });
